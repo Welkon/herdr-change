@@ -266,7 +266,6 @@ backup  prune  doctor
 - Sync：`--rebase` 与 `--merge` 都先 fetch
 - 子 Agent：`follow` 聚焦/读取
 - 模型：`models`、`provider`（base URL/key/models）
-- ：list/show/new/path/invoke
 - Terminal：线程级 list/new/run/close
 - Runner：env/push-env/preview/urls/snapshot/destroy
 - Web/Inbox：`serve` 本地 dashboard、API `/api/threads`
@@ -274,3 +273,14 @@ backup  prune  doctor
 - 工程：单元测试 + GitHub Actions、SQLite `user_version=3`
 
 本地等价物：Web/CRDT/托管 runner 用 `serve` + SQLite 单写、review HTML、SSH 脚本替代。
+
+## 8. v0.4 收尾（2026-10）
+
+- `serve` 支持 POST 写评论/note + token 鉴权；`--daemon/--stop/--status`
+- `comment --import/--export/--from-clipboard`，`comment --send --to` 跨线程
+- `land --json` 纯 JSON（日志在 `log` 字段）
+- `config set`、`delta auth login/logout`、`usage`、`restore-db`
+- provider 环境注入、`new --provider`
+- 写命令文件锁 `write.lock`
+- 多仓 fork/subagent 克隆额外 repo
+- SQLite `user_version=3`；unit + smoke + GitHub Actions

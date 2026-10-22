@@ -76,7 +76,7 @@ herdr-thread rename <id> "new label"
 herdr-thread delete <id> --keep-worktree
 herdr-thread guide <id>                 # review guide markdown
 herdr-thread share <id> --review        # 独立 review HTML
-herdr-thread serve --daemon             # http://127.0.0.1:8765
+herdr-thread serve --daemon --token secret   # http://127.0.0.1:8765
 
 # 9. 清理 / 恢复
 herdr-thread cleanup <id>
@@ -113,7 +113,7 @@ thread
 | `turn` | `--add/--list/--bookmark/--edit/--revert/--reseed` |
 | `search` | 跨线程搜索 turns |
 | `review` | 打开 reviewr；`--reviewer` 起只读审查 agent；`--verdict` |
-| `comment` | 行内评论：新增 / `--list` / `--send` / `--resolve` |
+| `comment` | 新增 / `--list` / `--send [--to]` / `--resolve` / `--import` / `--export` / `--from-clipboard` |
 | `attach` | 文件或 `--text` 附件复制到 worktree `.herdr-thread/attachments` |
 | `send` | 把文本/transcript 发给另一个线程的 agent |
 | `children` | 子线程树 |
@@ -127,9 +127,9 @@ thread
 | `subagent follow` | `follow <parent> <sub>` 聚焦并读子 Agent |
 | `models` / `provider` | 角色、profile、fallback、provider 管理 |
 | `terminal` | 线程级终端 list/new/run/close |
-| `serve` | 本地 Web dashboard / inbox |
+| `serve` | 本地 Web dashboard / inbox；POST 写评论/note；`--token` |
 | `config` | 显示有效配置/路径 |
-| `delta` | Delta 风格别名：open/thread/worktree |
+| `delta` | 别名：open/thread/worktree/auth(login/logout/status)/integration |
 | `restore-db` | 从 backup 恢复 threads.db |
 | `checkpoint` | 提交 / `--list` / `--restore`，每个 repo 单独记录 |
 | `land` | `push/pr/merge/merge-pr/local/hook`；批量 `--all/--tag`；dirty/verdict/pre-land/deps gate |

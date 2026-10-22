@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
+import functools
 import html
 import io
 import json
@@ -1009,6 +1011,31 @@ def cmd_capture(args):
 def cmd_comment(args):
     conn = db()
     r = thread_row(conn, args.id)
+    if getattr(args, "from_clipboard", False):
+        text = ""
+        for cmd in (["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"],
+                    ["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard"]):
+            if shutil.which(cmd[0]):
+                p = subprocess.run(cmd, text=True, capture_output=True)
+                if p.returncode == 0 and p.stdout.strip():
+                    text = p.stdout
+                    break
+        if not text.strip():
+            die("clipboard is empty or no clipboard tool")
+        n = 0
+        for line in text.splitlines():
+            m = re.match(r"^\s*(.+?):(\d+)\s*[:\-]?\s*(.*)$", line)
+            if m:
+                conn.execute("INSERT INTO comments(thread_id,file,line,body,created_at) VALUES(?,?,?,?,?)",
+                             (r["id"], m.group(1), int(m.group(2)), m.group(3), now()))
+                n += 1
+            elif line.strip():
+                conn.execute("INSERT INTO comments(thread_id,file,line,body,created_at) VALUES(?,?,?,?,?)",
+                             (r["id"], "", 0, line.strip(), now()))
+                n += 1
+        conn.commit()
+        print(f"imported {n} comments from clipboard")
+        return
     if getattr(args, "export_file", None):
         rows = conn.execute("SELECT * FROM comments WHERE thread_id=? ORDER BY id", (r["id"],)).fetchall()
         Path(args.export_file).write_text(json.dumps([dict(x) for x in rows], ensure_ascii=False, indent=2))
@@ -2215,6 +2242,11 @@ def cmd_subagent(args):
     )
     tid = cmd_new(ns)
     child = thread_row(conn, tid)
+    try:
+        clone_extra_repos(conn, parent, child, cfg)
+    except Exception as e:
+        cleanup_thread(conn, child, force=True)
+        die(f"subagent failed while cloning extra repos: {e}")
     cur = conn.execute(
         "INSERT INTO subagents(parent_id,child_thread_id,profile,kind,agent_name,status,created_at) "
         "VALUES(?,?,?,?,?,'working',?)",
@@ -2765,6 +2797,12 @@ def cmd_delta(args):
         p = subprocess.run(["herdr", "worktree", *rest], text=True)
         raise SystemExit(p.returncode)
     if args.action == "auth":
+        if rest and rest[0] in ("login", "logout"):
+            for tool in ("gh", "codex"):
+                if shutil.which(tool):
+                    subprocess.run([tool, "auth" if tool == "gh" else "login", rest[0], *rest[1:]])
+                    return
+            die("no gh/codex CLI found")
         for cmd in (["gh", "auth", "status"], ["codex", "login", "status"]):
             if shutil.which(cmd[0]):
                 p = subprocess.run(cmd, text=True, capture_output=True)
@@ -2811,6 +2849,8 @@ def cmd_serve(args):
         log = (DATA_DIR / "serve.log").open("a")
         child = [sys.executable, str(Path(__file__).resolve()), "serve",
                  "--host", args.host, "--port", str(args.port)]
+        if args.token:
+            child += ["--token", args.token]
         p = subprocess.Popen(child, stdout=log, stderr=log, start_new_session=True)
         pidfile.write_text(str(p.pid))
         print(f"serve started pid={p.pid} http://{args.host}:{args.port}")
@@ -2887,6 +2927,12 @@ def cmd_serve(args):
 
         def do_POST(self):
             from urllib.parse import parse_qs
+            token = args.token or os.environ.get("HERDR_THREAD_SERVE_TOKEN")
+            if token and self.headers.get("X-Herdr-Token") != token and parse_qs(urlparse(self.path).query).get("token", [None])[0] != token:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"forbidden")
+                return
             path = urlparse(self.path).path
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length).decode("utf-8", "replace")
@@ -2948,6 +2994,23 @@ def cmd_doctor(args):
 
 
 # ---------- main ----------
+
+def with_write_lock(fn):
+    @functools.wraps(fn)
+    def wrapper(args):
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with (DATA_DIR / "write.lock").open("w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                return fn(args)
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+    return wrapper
+
+
+for _fn_name in ("cmd_new", "cmd_land", "cmd_checkpoint", "cmd_cleanup", "cmd_delete"):
+    globals()[_fn_name] = with_write_lock(globals()[_fn_name])
+
 
 def build_parser():
     p = argparse.ArgumentParser(prog="herdr-thread", description="Delta-like threads on herdr")
@@ -3048,6 +3111,7 @@ def build_parser():
     cm.add_argument("--json", action="store_true")
     cm.add_argument("--import", dest="import_file")
     cm.add_argument("--export", dest="export_file")
+    cm.add_argument("--from-clipboard", action="store_true")
     cm.set_defaults(func=cmd_comment)
 
     at = sub.add_parser("attach", help="attach a file to a thread worktree")
@@ -3337,6 +3401,7 @@ def build_parser():
     sv = sub.add_parser("serve", help="local web dashboard / inbox")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--token")
     sv.add_argument("--daemon", action="store_true")
     sv.add_argument("--stop", action="store_true")
     sv.add_argument("--status", action="store_true")
