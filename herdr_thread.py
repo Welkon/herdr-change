@@ -689,6 +689,39 @@ def start_agent(name: str, kind: str, pane_id: str, workspace_id: str, cwd: str,
     return None
 
 
+def cmd_task(args):
+    label = args.label or " ".join(args.text.split())[:48]
+    ns = argparse.Namespace(
+        label=label, repo=args.repo, base=args.base, branch=None, worktree=None,
+        agent=args.agent, no_agent=False, prompt=args.text, tag=None, parent=None,
+        focus=True, trust_repository=False, profile=args.profile, role=args.role,
+        run_hooks=False, extra_agent_args=[],
+    )
+    tid = cmd_new(ns)
+    print(f"\nready: herdr-thread show {tid}   |   review: herdr-thread review {tid}")
+    return tid
+
+
+def cmd_done(args):
+    cfg = load_config()
+    conn = db()
+    r = thread_row(conn, args.id)
+    dirty = any(git(rr["worktree"], "status", "--porcelain", check=False).strip()
+                for rr in repo_rows(conn, r))
+    if dirty:
+        cmd_checkpoint(argparse.Namespace(id=r["id"], message=args.message or f"checkpoint: {r['label']}",
+                                          list=False, restore=None, clean=False, json=False))
+    strategy = "pr" if args.pr else (args.strategy or cfg["land_strategy"])
+    cmd_land(argparse.Namespace(
+        id=[r["id"]], all=False, tag=None, strategy=strategy, into=args.into,
+        title=None, body=None, cleanup=args.cleanup, yes=True, dry_run=False,
+        continue_on_error=False, allow_dirty=False, force=False, skip_checks=False,
+        method="squash", delete_branch=args.delete_branch, auto=False, json=False,
+        target=None, skip_deps=False,
+    ))
+    print(f"\ndone: {r['id']}")
+
+
 def cmd_list(args):
     cfg = load_config()
     conn = db()
@@ -3199,6 +3232,26 @@ def build_parser():
     n.add_argument("--no-focus", action="store_true")
     n.add_argument("--trust-repository", action="store_true")
     n.set_defaults(func=cmd_new)
+
+    tk = sub.add_parser("task", help="one-shot: create thread, start agent, send task, focus")
+    tk.add_argument("text")
+    tk.add_argument("--repo", action="append")
+    tk.add_argument("--base")
+    tk.add_argument("--agent")
+    tk.add_argument("--profile")
+    tk.add_argument("--role")
+    tk.add_argument("--label")
+    tk.set_defaults(func=cmd_task)
+
+    dn = sub.add_parser("done", help="one-shot: checkpoint + push/PR")
+    dn.add_argument("id")
+    dn.add_argument("--strategy", choices=["push", "pr", "merge", "merge-pr", "local", "hook"])
+    dn.add_argument("--into")
+    dn.add_argument("--pr", action="store_true", help="shortcut for --strategy pr")
+    dn.add_argument("--cleanup", action="store_true")
+    dn.add_argument("--delete-branch", action="store_true")
+    dn.add_argument("-m", "--message")
+    dn.set_defaults(func=cmd_done)
 
     l = sub.add_parser("list", help="list threads")
     l.add_argument("--all", action="store_true")

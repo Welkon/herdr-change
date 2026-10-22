@@ -18,14 +18,22 @@ Delta 式「线程 + worktree + Agent + 审查 + 落地」工作流，构建在 
 
 本机已链接到 `~/.local/bin/herdr-thread`。
 
-## 快速开始
+## 最简用法（日常只用 3 条）
+
+```bash
+herdr-thread task "把 IRQ 采集改成 forced-read"   # 建线程 + 起 agent + 发任务 + 切过去
+herdr-thread review <id>                          # 看 diff / reviewr 评论
+herdr-thread done <id>                            # checkpoint + push
+# 或 herdr-thread done <id> --pr                   # checkpoint + push + 开 PR
+```
+
+其它命令都是可选的；不想记就直接 `herdr-thread task` / `review` / `done`。
+
+## 完整用法
 
 ```bash
 # 1. 新建线程：worktree + workspace + agent + reviewr
-herdr-thread new "IRQ rewrite" \
-  --repo ~/emb/workspace/QP/QP-GD26-0901 \
-  --agent codex \
-  --prompt "把 IRQ 采集改成 forced-read 方案"
+herdr-thread task "把 IRQ 采集改成 forced-read 方案" --repo ~/emb/workspace/QP/QP-GD26-0901 --agent codex
 
 # 多仓库线程（同一 thread，多个 worktree）
 herdr-thread new "跨仓改动" --repo ~/proj/fw --repo ~/proj/host --no-agent
