@@ -2945,10 +2945,8 @@ KEYS_BLOCK = """
 # herdr-thread keybindings
 [[keys.command]]
 key = "prefix+t"
-type = "popup"
-width = "52%"
-height = "46%"
-command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-task-$$; /home/felix/.local/bin/herdr-thread ui task --result \"$result\" 2>>/tmp/herdr-thread-ui.log; task=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
+type = "plugin_action"
+command = "herdr-thread.ui.task"
 description = "herdr-thread: new task"
 
 [[keys.command]]
@@ -2959,10 +2957,8 @@ description = "herdr-thread: review current"
 
 [[keys.command]]
 key = "prefix+alt+d"
-type = "popup"
-width = "52%"
-height = "50%"
-command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-done-$$; /home/felix/.local/bin/herdr-thread ui done --result \"$result\" 2>>/tmp/herdr-thread-ui.log; ans=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
+type = "plugin_action"
+command = "herdr-thread.ui.done"
 description = "herdr-thread: done current"
 """
 
@@ -3189,8 +3185,11 @@ def cmd_install_keys(args):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.rstrip() + "\n" + KEYS_BLOCK)
+    plugin = Path(__file__).resolve().parent / "herdr-plugin"
+    if plugin.exists():
+        subprocess.run(["herdr", "plugin", "link", str(plugin)], capture_output=True, text=True)
     print(f"installed keybindings in {path}")
-    print("run: herdr server reload-config")
+    print("run: herdr server reload-config (and reload config in the TUI)")
 
 
 def cmd_config(args):

@@ -1,0 +1,34 @@
+id = "herdr-thread.ui"
+name = "herdr-thread UI"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+platforms = ["linux", "macos"]
+description = "New task and finish-thread popups for herdr-thread."
+
+[[panes]]
+id = "task"
+title = "new task"
+placement = "popup"
+width = "52%"
+height = "46%"
+command = ["bash", "task.sh"]
+
+[[panes]]
+id = "done"
+title = "finish thread"
+placement = "popup"
+width = "52%"
+height = "50%"
+command = ["bash", "done.sh"]
+
+[[actions]]
+id = "task"
+title = "herdr-thread: new task"
+contexts = ["pane", "workspace"]
+command = ["bash", "open.sh", "task"]
+
+[[actions]]
+id = "done"
+title = "herdr-thread: finish thread"
+contexts = ["pane", "workspace"]
+command = ["bash", "open.sh", "done"]
