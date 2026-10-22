@@ -2948,7 +2948,7 @@ key = "prefix+t"
 type = "popup"
 width = "72%"
 height = "32%"
-command = "task=$(/home/felix/.local/bin/herdr-thread ui task) || exit 0; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
+command = "export TERM=\"${TERM:-xterm-256color}\"; task=$(/home/felix/.local/bin/herdr-thread ui task 2>>/tmp/herdr-thread-ui.log) || exit 0; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
 description = "herdr-thread: new task"
 
 [[keys.command]]
@@ -2962,7 +2962,7 @@ key = "prefix+alt+d"
 type = "popup"
 width = "72%"
 height = "45%"
-command = "ans=$(/home/felix/.local/bin/herdr-thread ui done) || exit 0; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
+command = "export TERM=\"${TERM:-xterm-256color}\"; ans=$(/home/felix/.local/bin/herdr-thread ui done 2>>/tmp/herdr-thread-ui.log) || exit 0; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
 description = "herdr-thread: done current"
 """
 
@@ -3099,7 +3099,14 @@ def _ui_done():
 
 
 def cmd_ui(args):
-    value = _ui_task() if args.kind == "task" else _ui_done()
+    try:
+        value = _ui_task() if args.kind == "task" else _ui_done()
+    except Exception as e:
+        print(f"herdr-thread ui failed: {e}", file=sys.stderr)
+        try:
+            value = input("Task: " if args.kind == "task" else "Done [p/r/c]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            value = None
     if value:
         print(value)
 
