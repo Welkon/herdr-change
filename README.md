@@ -2,20 +2,21 @@
 
 Delta 式「线程 + worktree + Agent + 审查 + 落地」工作流，构建在 [herdr](https://herdr.dev) 之上。
 
-不依赖 Delta GUI，也不碰 herdr 内部状态：全部通过 herdr CLI / git 操作。
+不依赖 Delta GUI，也不碰 herdr 内部状态：全部通过 herdr CLI / git / SQLite 操作。
 
 - 设计文档与 Delta 功能对照：[DESIGN.md](DESIGN.md)
-- 状态库：`~/.local/share/herdr-thread/threads.db`（SQLite）
+- 远端/临时 runner：[RUNNER.md](RUNNER.md)
+- 状态库：`~/.local/share/herdr-thread/threads.db`
 - 配置：`~/.config/herdr-thread/config.toml`
 
 ## 依赖
 
-- `herdr >= 0.7.5`（需要 `herdr` 在 PATH 上，且 server 正在运行）
+- `herdr >= 0.7.5`，且 server 正在运行
 - `reviewr` 插件（`herdr plugin install persiyanov/herdr-reviewr`）
 - `git`
-- 可选：`gh`（`land --strategy pr`）
+- 可选：`gh`（PR / CI）
 
-本机已经装好并链接到 `~/.local/bin/herdr-thread`。
+本机已链接到 `~/.local/bin/herdr-thread`。
 
 ## 快速开始
 
@@ -24,159 +25,189 @@ Delta 式「线程 + worktree + Agent + 审查 + 落地」工作流，构建在 
 herdr-thread new "IRQ rewrite" \
   --repo ~/emb/workspace/QP/QP-GD26-0901 \
   --agent codex \
-  --prompt "把 IRQ 采集改成 forced-read 方案，先只改 KEY/M"
+  --prompt "把 IRQ 采集改成 forced-read 方案"
 
-# 2. 看所有线程状态
+# 多仓库线程（同一 thread，多个 worktree）
+herdr-thread new "跨仓改动" --repo ~/proj/fw --repo ~/proj/host --no-agent
+
+# 2. 状态
 herdr-thread list
 herdr-thread show <id>
+herdr-thread diff <id>
 
-# 3. 给 Agent 追加指令
+# 3. 给 Agent 指令 / 捕获回复
 herdr-thread prompt <id> "补上单元测试" --wait
+herdr-thread capture <id>          # 把当前 agent 输出存成 turn
+herdr-thread transcript <id>       # 浏览/搜索线程记录
 
-# 4. 审查：聚焦 workspace + 打开 reviewr
-herdr-thread review <id>
-herdr-thread review <id> --reviewer --agent codex   # 额外起一个只读审查 agent
+# 4. 审查
+herdr-thread review <id> --reviewer --agent codex
+herdr-thread comment <id> "这里要判空" --file main.c --line 42
+herdr-thread comment <id> --send
 herdr-thread review <id> --verdict approved
 
-# 5. 打 checkpoint（可回退点）
-herdr-thread checkpoint <id> -m "wip: IRQ rewrite"
+# 5. checkpoint / 回退
+herdr-thread checkpoint <id> -m "wip: IRQ"
+herdr-thread checkpoint <id> --list
+herdr-thread checkpoint <id> --restore latest
 
 # 6. 落地
-herdr-thread land <id> --strategy push          # push -u origin <branch>
-herdr-thread land <id> --strategy pr            # gh pr create
+herdr-thread land <id> --strategy push
+herdr-thread land <id> --strategy pr
 herdr-thread land <id> --strategy merge --into main
-herdr-thread land <id> --strategy hook          # 执行 ~/.config/herdr-thread/land.sh
+herdr-thread land <id> --strategy merge-pr --method squash
+herdr-thread land <id> --strategy hook
 
-# 批量 land（默认先 dry-run 看计划）
+# 批量
 herdr-thread land --all --strategy push --dry-run
 herdr-thread land --all --strategy push --yes --cleanup
-herdr-thread land --tag firmware --strategy merge --into main --yes
-herdr-thread land --all --strategy push --yes --continue-on-error
 
-# PR / CI
-herdr-thread pr <id>                    # 当前 PR 状态
-herdr-thread pr <id> --watch            # 轮询到 merged/closed
-herdr-thread sync --pr                  # 批量刷新所有打开的 PR
+# 7. PR / CI
+herdr-thread pr <id> --watch
+herdr-thread sync --pr
+herdr-thread watch --daemon --interval 60
+herdr-thread watch --status
+herdr-thread watch --stop
 
-# 7. 清理 worktree / workspace
+# 8. 清理 / 恢复
 herdr-thread cleanup <id>
+herdr-thread recover --create      # herdr 重启/workspace 丢失后重新绑定
+herdr-thread prune --workspaces --dry-run
 ```
 
-## 项目钩子（Delta `.agents/setup` 等价物）
-
-```bash
-herdr-thread new "..." --run-hooks   # 建完 worktree 后跑 .agents/prepare + .agents/setup
-herdr-thread setup <id>              # 对已有 worktree 补跑
-```
-
-规则：
-
-- 先跑 `.agents/prepare`，再跑 `.agents/setup`；`.delta/setup` 存在时覆盖 `.agents/setup`。
-- 脚本必须可执行；失败会写 event，但不会阻止线程创建（Delta 也是告诉 Agent 去 debug）。
-- 钩子只在 worktree 内执行，cwd 是 checkout 根。
-
-## 线程 = 什么
-
-一条线程对应：
+## 一条线程 = 什么
 
 ```
 thread
-├── git worktree        独立 checkout（不污染主仓）
-├── herdr workspace     独立窗口/标签
-├── agent pane          codex / claude / pi / ...
-└── reviewr pane        diff + 行内评论 + PR
+├── 1..N 个 git worktree（多仓库）
+├── herdr workspace（主仓）
+├── agent pane
+├── reviewr pane
+├── checkpoints / turns / comments / attachments（SQLite）
+└── PR / CI 状态（thread_repos）
 ```
 
-对话历史不在本工具里，留在 Agent 自己的 session；本工具只编排和记录状态。
+对话本体仍归 Agent 自己的 session；`herdr-thread` 只保存可搜索的 turn 摘要、评论和编排元数据。
 
 ## 命令
 
 | 命令 | 作用 |
 |---|---|
-| `new` | 建 worktree + workspace + agent + reviewr；`--profile` / `--run-hooks` |
-| `list` | 状态总览（agent state / dirty / ahead / review），支持 `--tag --search --bookmarked --all` |
-| `show` | 单线程详情 + 最近提交 + uncommitted diff stat |
-| `diff` | 打印 `base..HEAD` + 未提交 diff |
-| `setup` | 在 worktree 里跑 `.agents/prepare` / `.agents/setup` |
-| `prompt` | 给 Agent 发指令（`--wait` 等待状态） |
-| `review` | 聚焦 + 打开 reviewr，记录 verdict；`--reviewer` 起只读审查 agent |
-| `checkpoint` | `git add -A && git commit`，记录 head |
-| `land` | `push` / `pr` / `merge` / `hook`；支持 `--all` / `--tag` 批量，`--dry-run` / `--yes` / `--continue-on-error` |
-| `pr` | 查看 PR 状态；`--watch` 轮询 CI/merge 状态 |
-| `sync` | 刷新 agent 状态；`--rebase` 拉上游；`--pr` 刷新 PR/CI；状态变化发通知 |
-| `fork` | 从父线程当前 HEAD 建子线程 |
-| `subagent` | `--profile worker/scout/reviewer` 子线程 |
+| `new` | 建 worktree/workspace/agent/reviewr；`--repo` 可重复；`--profile/--role/--run-hooks` |
+| `list` | 状态总览；`--tag --search --bookmarked --all --json` |
+| `show` | 线程详情、repos、checkpoints、PR；`--json` |
+| `diff` | 所有 repo 的 `base..HEAD` + 未提交 diff |
+| `setup` | 在 worktree 跑 `.agents/prepare` / `.agents/setup` |
+| `prompt` | 给 Agent 发指令；`--wait` |
+| `capture` | 读取 agent 输出并写入 turns |
+| `transcript` | 浏览 turns；`--search --bookmarked` |
+| `turn` | `--add/--list/--bookmark/--edit/--revert` |
+| `search` | 跨线程搜索 turns |
+| `review` | 打开 reviewr；`--reviewer` 起只读审查 agent；`--verdict` |
+| `comment` | 行内评论：新增 / `--list` / `--send` / `--resolve` |
+| `attach` | 附件复制到 worktree `.herdr-thread/attachments` |
+| `send` | 把文本/transcript 发给另一个线程的 agent |
+| `checkpoint` | 提交 / `--list` / `--restore`，每个 repo 单独记录 |
+| `land` | `push/pr/merge/merge-pr/hook`；批量 `--all/--tag`；dirty/verdict/pre-land gate |
+| `pr` | 查看 / `--watch` PR + CI |
+| `sync` | 刷新 agent 状态；`--rebase`（先 fetch）；`--pr` |
+| `watch` | 后台轮询；`--daemon/--status/--stop` |
+| `fork` | 从当前 HEAD 建子线程；`--with-context/--from-turn` 注入父 transcript |
+| `subagent` | 独立线程或 `--in-place` 同 worktree 子 Agent；`--list` |
+| `join` | 收集子 Agent 输出并回传父 Agent |
 | `open` | 聚焦 workspace |
 | `tag` | 标签 / 收藏 / 归档 |
-| `cleanup` | 移除 worktree + 关闭 workspace |
-| `machines` | 列出已保存的 herdr SSH machine |
-| `remote` | 把命令透传给远端 herdr：`remote mini agent list` |
+| `cleanup` | 移除所有 repo 的 worktree + workspace |
+| `recover` | 重新绑定 workspace/pane/agent；`--create/--start/--prune` |
+| `machines` | 列出 herdr SSH machines |
+| `remote` | 透传远端命令：`remote mini agent list` |
+| `runner` | 远端 runner 生命周期：add/up/down/bootstrap/forward/unforward |
+| `share` | 打印远程 attach / 协作说明 |
 | `notify` | 桌面通知 |
-| `doctor` | 检查 herdr/git/gh/DB |
+| `backup` | 备份 threads.db |
+| `prune` | 清理孤儿 thread/worktree/workspace |
+| `doctor` | 检查 herdr/git/gh/reviewr/DB |
+
+## 安全门
+
+`land` 默认执行：
+
+1. 所有 repo 的 dirty 检查（`--allow-dirty` 跳过）
+2. rejected 审查阻断；`require_approval=true` 时要求 approved（`--force` 跳过）
+3. pre-land 检查：
+   - `.agents/pre-land`
+   - `.herdr-thread/pre-land.sh`
+   - `pre_land_script`
+   - `pre_land_commands`（shell）
+   - `--skip-checks` 跳过
+
+## 多仓库
+
+```bash
+herdr-thread new "跨仓" --repo ~/fw --repo ~/host
+```
+
+- 第一个 repo 由 herdr 建 workspace；其余用 `git worktree add`
+- `checkpoint/diff/land/cleanup` 遍历全部 repo
+- `thread_repos` 保存每个 repo 的 branch、base、PR、CI
+- `land --strategy pr` 每个 repo 各开一个 PR
+
+## 子 Agent
+
+```bash
+# 同 worktree，split pane
+herdr-thread subagent <id> --profile scout --in-place --prompt "只读调研"
+
+# 独立 worktree/thread
+herdr-thread subagent <id> --profile worker --prompt "实现 X"
+
+herdr-thread subagent <id> --list
+herdr-thread join <id> 1
+```
+
+`join` 等待子 Agent idle，读取输出，写到父 worktree `.herdr-thread/subagents/`，并把路径发给父 Agent。
 
 ## 配置
-
-`~/.config/herdr-thread/config.toml`：
 
 ```toml
 worktree_root = "~/.herdr-worktrees"
 default_agent = "codex"
-review_plugin = "persiyanov.reviewr"
-review_entrypoint = "pane"
-land_strategy = "push"       # push | pr | merge | hook
+land_strategy = "push"       # push | pr | merge | merge-pr | hook
 notify = true
+require_approval = false
+fallback = []                 # e.g. ["codex", "claude"]
+pre_land_script = ""
+pre_land_commands = []
 
-[profiles.worker]
+[roles.implementer]
 kind = "codex"
-args = ["--model", "gpt-5"]  # 原样追加到 herdr agent start ... -- <args>
-prompt = "你是实现子 Agent。只做被指派的子任务，完成后总结改动文件和验证方式。"
-
-[profiles.scout]
-kind = "codex"
-args = []
-prompt = "你是调研子 Agent。只读代码并给出结论，不修改任何文件。"
+args = ["--model", "gpt-5"]
 
 [profiles.reviewer]
 kind = "codex"
 args = []
-prompt = "你是审查子 Agent。只读 diff，按文件列出风险、遗漏测试和回退建议，不改文件。"
+prompt = "你是审查子 Agent。只读 diff，按文件列风险、遗漏测试和回退建议。"
 ```
 
-`new --profile worker` 会采用 profile 的 `kind` / `args` / `prompt`（显式 `--agent` 覆盖 kind）。
-`subagent` 额外把 profile prompt 作为初始任务。
-
-`land --strategy hook` 会执行 `~/.config/herdr-thread/land.sh`，环境变量：
+`land --strategy hook` 执行 `~/.config/herdr-thread/land.sh`，环境变量：
 
 ```
-THREAD_ID THREAD_LABEL REPO WORKTREE BRANCH
+THREAD_ID THREAD_LABEL REPO WORKTREE BRANCH REPOS
 ```
 
-## PR / CI 状态
+`runner` 使用 `~/.config/herdr-thread/runner-up.sh` / `runner-down.sh`，环境变量
+`RUNNER_NAME RUNNER_HOST RUNNER_REPO`。
 
-`land --strategy pr` 会 push 分支、`gh pr create`，并把 URL/number 写进 thread。
-之后：
+## 明确不追
 
-```bash
-herdr-thread pr <id>            # state / ci / mergeable / review
-herdr-thread pr <id> --watch    # 每 30s 轮询，直到 MERGED 或 CLOSED
-herdr-thread sync --pr          # 批量轮询；变化时发通知
-```
-
-状态存于 `threads.pr_state / ci_state / mergeable / last_sync_at`：
-
-- `ci_state`: `none` / `pending` / `success` / `failure`
-- `pr_state`: `OPEN` / `MERGED` / `CLOSED`
-- PR 合并后 `status` 自动变 `landed`，`landed_at` 补齐
-
-## 与 Delta 的取舍
-
-已覆盖：worktree 隔离、thread 元数据、多 Agent、reviewr 审查/行内评论、land、checkpoint、fork/subagent、标签/归档、通知、CLI、`.agents/setup` 钩子、远端 machine 透传。
-
-不追：DeltaDB/CRDT、Web 端、富文本多人协作、托管式云端临时 runner。远端/临时 runner 的自建流程见 [RUNNER.md](RUNNER.md)。
+DeltaDB/CRDT、Web 端、富文本多人协作、托管 Cloud Runner。远端/临时 runner 是脚本化流程，
+见 [RUNNER.md](RUNNER.md)。
 
 ## 开发
 
 ```bash
-python3 herdr_thread.py --help
 python3 -m py_compile herdr_thread.py
+tests/smoke.sh
 ```
+
+`tests/smoke.sh` 使用隔离 DB/config/worktree，覆盖批量 land、多仓、checkpoint、turns、PR、recover。

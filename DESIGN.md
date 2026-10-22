@@ -200,7 +200,7 @@ prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏�
 - **P0（已完成）**：`new/list/show/diff/prompt/review/checkpoint/land/cleanup/open` + DB + 配置。
 - **P1（已完成）**：`fork/subagent/sync --rebase/tag/archive`、状态轮询 + 通知、`.agents/prepare|setup` 钩子。
 - **P2（已完成）**：review verdict 持久化、`review --reviewer`、批量 land、PR/CI 状态轮询。
-- **P3（部分完成）**：`machines/remote/notify` 透传与 RUNNER.md 已完成；临时 runner 目前是脚本化流程，未做托管。
+- **P3（已完成）**：`machines/remote/notify` 透传、runner 生命周期/端口转发、share、RUNNER.md；托管平台本身不做。
 
 ---
 
@@ -218,8 +218,10 @@ prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏�
 已落地命令：
 
 ```
-new  list  show  setup  prompt  review  checkpoint  land  pr  cleanup
-open  diff  tag  sync  fork  subagent  machines  remote  notify  doctor
+new  list  show  setup  transcript  turn  search  capture  prompt  review
+comment  attach  send  checkpoint  land  pr  cleanup  open  diff  tag  sync
+recover  watch  fork  subagent  join  machines  remote  runner  share  notify
+backup  prune  doctor
 ```
 
 已验证：
@@ -233,7 +235,27 @@ open  diff  tag  sync  fork  subagent  machines  remote  notify  doctor
 
 已知边界：
 
-- 每条 thread 绑定一个 repo；跨仓任务用多个 thread。
-- 远端 thread 的 DB 在远端机器，本地 `remote` 只做命令透传。
-- reviewr 的行内评论由插件回传 Agent；`herdr-thread` 不复制评论内容。
+- 多 repo 线程：主 repo 用 herdr workspace，其余 repo 用 `git worktree add`；Agent 默认在主 repo。
+- 远端 thread 的 DB 在远端机器，本地 `remote` 只做命令透传；runner 是脚本化流程。
+- reviewr 的行内评论由插件回传 Agent；`herdr-thread` 的 comments 是 CLI 侧独立记录。
 - 不做每轮自动快照；用 `checkpoint` 显式建提交作为回退点。
+- turn 的 edit/revert 只改元数据，不能改写 Agent 已发送的上下文。
+
+
+---
+
+## 6. v0.2 补齐（2026-10）
+
+新增：
+
+- 安全门：dirty / rejected / require_approval / pre-land 脚本与命令；`land --allow-dirty/--force/--skip-checks`
+- PR 闭环：`merge-pr`、auto-merge、`pr --watch`、`watch --daemon/--status/--stop`、CI 归并
+- 恢复：`checkpoint --list/--restore`、`recover --create/--start/--prune`、`prune`
+- 多仓库：`thread_repos`、`thread_repos` 级 PR/CI、checkpoint/diff/land/cleanup 全仓遍历
+- 记录：turns / comments / attachments / search / bookmark / fork 上下文注入 / send
+- 子 Agent：`subagent --in-place` + `join`；独立线程子 Agent 仍保留
+- 模型：`roles.*`、`--role`、`fallback`
+- 运行环境：`runner add/up/down/bootstrap/forward/unforward`、`share`
+- 工程化：`backup`、`prune`、`HERDR_THREAD_DATA/CONFIG`、`pyproject.toml`、`tests/smoke.sh`
+
+仍不追：DeltaDB/CRDT、Web 端、富文本多人协作、托管 Cloud Runner。

@@ -113,3 +113,27 @@ herdr-thread sync       # 状态变化时自动发通知
 | runner 生命周期自动回收 | 脚本 / 云厂商 CLI 回收 |
 
 保留的能力：setup 脚本、隔离 checkout、远端 Agent、状态读取、审查、land。
+
+## 6. `herdr-thread runner` 封装
+
+```bash
+# 记录一台机器
+herdr-thread runner add mini --host mini --repo git@github.com:you/repo.git
+
+# 可选：自定义创建/销毁脚本
+# ~/.config/herdr-thread/runner-up.sh
+# ~/.config/herdr-thread/runner-down.sh
+herdr-thread runner up mini
+herdr-thread runner down mini
+
+# 在远端 clone + 跑 .agents/prepare / setup + 启动 herdr server
+herdr-thread runner bootstrap mini --repo git@github.com:you/repo.git --path '~/work/repo'
+
+# 预览端口转发
+herdr-thread runner forward mini --local 8080 --remote 3000
+herdr-thread runner unforward mini
+herdr-thread runner list
+```
+
+`runner bootstrap` 只依赖 SSH，不假设云厂商；创建/销毁临时机器仍由
+Tailscale/云 CLI/本地 VM 负责。
