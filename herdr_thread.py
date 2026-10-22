@@ -529,6 +529,16 @@ def cmd_new(args):
     for x in repos:
         if not is_git_repo(x):
             die(f"not a git repository: {x}")
+        if (Path(x) / ".emb-agent").exists():
+            task = ""
+            try:
+                task = (Path(x) / ".emb-agent" / ".current-task").read_text().strip()
+            except OSError:
+                pass
+            print(f"warning: {x} is emb-agent managed"
+                  + (f" (current task: {task})" if task else "")
+                  + "; herdr-thread uses a separate worktree/session and will bypass emb lifecycle",
+                  file=sys.stderr)
         if run(["git", "-C", x, "rev-parse", "--verify", "HEAD"], check=False).returncode != 0:
             die(f"repository has no commits yet: {x}")
 
