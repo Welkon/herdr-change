@@ -2302,20 +2302,6 @@ def cmd_follow(args):
         print(p.stdout.strip()[-args.chars:])
 
 
-def cmd_mcp(args):
-    agent = args.agent or "codex"
-    if agent == "claude":
-        cmd = ["claude", "mcp", *args.rest]
-    elif agent == "codex":
-        cmd = ["codex", "mcp", *args.rest]
-    else:
-        die(f"unsupported mcp agent: {agent}")
-    if not shutil.which(cmd[0]):
-        die(f"{cmd[0]} not found")
-    p = subprocess.run(cmd, text=True)
-    raise SystemExit(p.returncode)
-
-
 def cmd_usage(args):
     conn = db()
     threads = conn.execute("SELECT status,COUNT(*) n FROM threads GROUP BY status").fetchall()
@@ -2784,9 +2770,6 @@ def cmd_delta(args):
                 p = subprocess.run(cmd, text=True, capture_output=True)
                 print(f"$ {' '.join(cmd)}")
                 print((p.stdout or p.stderr).strip()[:2000])
-        return
-    if args.action == "mcp":
-        cmd_mcp(argparse.Namespace(agent="codex", rest=rest or ["list"]))
         return
     if args.action == "integration":
         print(f"bash completion: {Path(__file__).resolve().parent / 'completions' / 'herdr-thread.bash'}")
@@ -3267,11 +3250,6 @@ def build_parser():
     fl.add_argument("--chars", type=int, default=4000)
     fl.set_defaults(func=cmd_follow)
 
-    mc = sub.add_parser("mcp", help="MCP server management via codex/claude")
-    mc.add_argument("--agent", default="codex", choices=["codex", "claude"])
-    mc.add_argument("rest", nargs=argparse.REMAINDER)
-    mc.set_defaults(func=cmd_mcp)
-
     us = sub.add_parser("usage", help="local usage stats")
     us.add_argument("--json", action="store_true")
     us.set_defaults(func=cmd_usage)
@@ -3348,7 +3326,7 @@ def build_parser():
     cf.set_defaults(func=cmd_config)
 
     dl = sub.add_parser("delta", help="Delta-compatible command aliases")
-    dl.add_argument("action", choices=["open", "thread", "worktree", "auth", "mcp", "integration"])
+    dl.add_argument("action", choices=["open", "thread", "worktree", "auth", "integration"])
     dl.add_argument("rest", nargs=argparse.REMAINDER)
     dl.set_defaults(func=cmd_delta)
 

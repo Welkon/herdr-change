@@ -54,11 +54,10 @@
 | D3 | Agent 跑命令 | Agent 自身终端工具 | ✅ |
 | D4 | 共享线程里的终端 | herdr remote attach 同一 session | 🟡 |
 
-### E. 规则 / MCP / 项目设置
+### E. 规则 / 项目设置
 
 | # | Delta 功能 | 替代 | 状态 |
 |---|---|---|---|
-| E4 | MCP 服务器 | 配在 Agent 自己的 config（codex/claude/pi） | ✅ |
 | E5 | `.agents/prepare` / setup | `new --run-hooks` 或 `setup <id>` | 🟡 |
 | E6 | 项目规则 | `.agents/` + Agent 自身规则文件 | ✅ |
 
@@ -109,7 +108,6 @@
 | J2 | `delta thread` | `herdr-thread list/show` | 🟡 |
 | J3 | `delta worktree` | `herdr worktree *` + `herdr-thread new/cleanup` | ✅ |
 | J4 | `delta auth` | 各 Agent 自己的登录 | ✅ |
-| J5 | `delta mcp` | Agent 自身 MCP 配置 | ✅ |
 | J6 | `delta integration` | herdr `integration` | ✅ |
 
 ---
@@ -204,7 +202,7 @@ prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏�
 ## 4. 明确的取舍
 
 - **不复制**：DeltaDB/CRDT、每轮增量快照、Web 端、富文本多人协作、云端临时 runner 的托管体验。
-- **保留**：git 作为唯一事实来源；Agent 自己的会话/技能/MCP 配置；reviewr 的审查体验。
+- **保留**：git 作为唯一事实来源；Agent 自己的会话配置；reviewr 的审查体验。
 - **优势**：原生 WSL、无 GUI/DPI/光标/Portal 问题；可脚本化；换 Agent 不改工作流。
 
 
