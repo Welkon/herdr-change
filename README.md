@@ -113,8 +113,8 @@ thread
 | `transcript` | 浏览 turns；`--search --bookmarked` |
 | `turn` | `--add/--list/--bookmark/--edit/--revert/--reseed` |
 | `search` | 跨线程搜索 turns |
-| `review` | 打开 reviewr；`--reviewer` 起只读审查 agent；`--verdict` |
-| `comment` | 新增 / `--list` / `--send [--to]` / `--resolve` / `--import` / `--export` / `--from-clipboard` |
+| `review` | 打开 reviewr；`--reviewer` 起只读审查 agent；`--verdict`；`--sync-reviewr` |
+| `comment` | 新增 / `--list` / `--send [--to]` / `--resolve` / `--import` / `--export` / `--from-clipboard` / `--from-reviewr` |
 | `attach` | 文件或 `--text` 附件复制到 worktree `.herdr-thread/attachments` |
 | `send` | 把文本/transcript 发给另一个线程的 agent |
 | `children` | 子线程树 |
@@ -127,7 +127,7 @@ thread
 | `check-remote` | 对比本地 branch 与 origin |
 | `subagent follow` | `follow <parent> <sub>` 聚焦并读子 Agent |
 | `terminal` | 线程级终端 list/new/run/close |
-| `serve` | 本地 Web dashboard / inbox；POST 写评论/note；`--token` / `--tls-cert` / `--tls-key` |
+| `serve` | 本地 Web dashboard / inbox；POST 写评论/note；`--token` / `--tls-cert` / `--tls-key`；`user` 管理 token |
 | `config` | show/path/set，支持 `roles.foo.kind` 这类嵌套 key |
 | `delta` | 别名：open/thread/worktree/auth(login/logout/status)/integration |
 | `restore-db` | 从 backup 恢复 threads.db |
@@ -146,6 +146,7 @@ thread
 | `machines` | 列出 herdr SSH machines |
 | `remote` | 透传远端命令：`remote mini agent list` |
 | `mirror` / `remote-threads` | 拉取远端 herdr-thread 列表到本地 DB 并查看 |
+| `user` | serve 的多用户 token：add/list/remove |
 | `runner` | add/up/down/destroy/bootstrap/forward/preview/unforward/urls/env/push-env/snapshot |
 | `share` | 打印远程 attach / 协作说明 |
 | `notify` | 桌面通知 |
@@ -222,6 +223,18 @@ THREAD_ID THREAD_LABEL REPO WORKTREE BRANCH REPOS
 
 `runner` 使用 `~/.config/herdr-thread/runner-up.sh` / `runner-down.sh`，环境变量
 `RUNNER_NAME RUNNER_HOST RUNNER_REPO`。
+
+## reviewr 插件桥接
+
+本机 reviewr 已打补丁：每次添加/编辑/删除/发送评论时，会把评论写到
+`~/.cache/herdr-reviewr/<worktree-hash>.json`。同步：
+
+```bash
+herdr-thread comment <id> --from-reviewr
+herdr-thread review <id> --sync-reviewr
+```
+
+补丁源码提交在 reviewr 插件仓库本地分支 `1746108`；`bin/herdr-reviewr` 已替换为新构建。
 
 ## 本地等价物
 

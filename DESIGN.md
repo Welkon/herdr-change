@@ -232,7 +232,7 @@ backup  prune  doctor
 
 - 多 repo 线程：主 repo 用 herdr workspace，其余 repo 用 `git worktree add`；Agent 默认在主 repo。
 - 远端 thread 的 DB 在远端机器，本地 `remote` 只做命令透传；runner 是脚本化流程。
-- reviewr 的行内评论由插件回传 Agent；`herdr-thread` 的 comments 是 CLI 侧独立记录。
+- reviewr 已打补丁：评论变更写入 `~/.cache/herdr-reviewr/*.json`，`comment --from-reviewr` / `review --sync-reviewr` 回写 SQLite。
 - 不做每轮自动快照；用 `checkpoint` 显式建提交作为回退点。
 - turn 的 edit/revert 只改元数据，不能改写 Agent 已发送的上下文。
 

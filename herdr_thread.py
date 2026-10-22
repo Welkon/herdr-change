@@ -259,6 +259,34 @@ def db() -> sqlite3.Connection:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS users (
+            name TEXT PRIMARY KEY,
+            token TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL DEFAULT 'writer',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    ccols = {row[1] for row in conn.execute("PRAGMA table_info(comments)")}
+    if "author" not in ccols:
+        conn.execute("ALTER TABLE comments ADD COLUMN author TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS remote_threads (
+            machine TEXT NOT NULL,
+            id TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            repo TEXT NOT NULL DEFAULT '',
+            branch TEXT NOT NULL DEFAULT '',
+            data TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(machine,id)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS checkpoints (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id TEXT NOT NULL,
@@ -954,6 +982,54 @@ def record_turn(conn, tid: str, role: str, content: str, meta: str = "{}") -> in
     return cur.lastrowid
 
 
+def reviewr_state_path(repo: str) -> Path:
+    base = Path(os.environ.get("XDG_CACHE_HOME", str(HOME / ".cache"))) / "herdr-reviewr"
+    value = str(Path(repo).resolve())
+    h = 0xcbf29ce484222325
+    for b in value.encode():
+        h ^= b
+        h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return base / f"{h:016x}.json"
+
+
+def import_reviewr_comments(conn, r, quiet=False) -> int:
+    n = 0
+    paths = []
+    for rr in repo_rows(conn, r):
+        path = reviewr_state_path(rr["worktree"])
+        paths.append(path)
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except Exception as e:
+            if not quiet:
+                print(f"cannot read {path}: {e}")
+            continue
+        for c in data.get("comments", []):
+            body = (c.get("text") or "").strip()
+            if not body:
+                continue
+            file = c.get("file") or ""
+            line = int(c.get("start") or c.get("line") or 0)
+            exists = conn.execute(
+                "SELECT 1 FROM comments WHERE thread_id=? AND file=? AND line=? AND body=?",
+                (r["id"], file, line, body),
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute("INSERT INTO comments(thread_id,file,line,body,created_at) VALUES(?,?,?,?,?)",
+                         (r["id"], file, line, body, now()))
+            n += 1
+    conn.commit()
+    if not quiet:
+        if n:
+            print(f"imported {n} reviewr comments")
+        else:
+            print(f"no new reviewr comments (checked {len(paths)} worktree state file(s))")
+    return n
+
+
 def cmd_transcript(args):
     conn = db()
     r = thread_row(conn, args.id)
@@ -1062,6 +1138,9 @@ def cmd_capture(args):
 def cmd_comment(args):
     conn = db()
     r = thread_row(conn, args.id)
+    if getattr(args, "from_reviewr", False):
+        import_reviewr_comments(conn, r)
+        return
     if getattr(args, "from_clipboard", False):
         text = ""
         for cmd in (["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"],
@@ -1250,6 +1329,9 @@ def cmd_review(args):
                  (args.verdict or r["review_state"] or "pending", review_pane, r["id"]))
     conn.commit()
     event(conn, r["id"], "review", args.verdict or "opened")
+
+    if getattr(args, "sync_reviewr", False):
+        import_reviewr_comments(conn, r, quiet=False)
 
     reviewer_agent = r["reviewer_agent"]
     reviewer_pane = r["reviewer_pane_id"]
@@ -2637,6 +2719,29 @@ def cmd_share(args):
         print(f"wrote {out}")
 
 
+def cmd_user(args):
+    conn = db()
+    if args.action == "list":
+        rows = conn.execute("SELECT name,role,created_at FROM users ORDER BY name").fetchall()
+        for x in rows:
+            print(f"{x['name']:16} {x['role']:8} {x['created_at']}")
+        if not rows:
+            print("no users")
+        return
+    if args.action == "remove":
+        conn.execute("DELETE FROM users WHERE name=?", (args.name,))
+        conn.commit()
+        print(f"removed user {args.name}")
+        return
+    if not args.name:
+        die("user add requires a name")
+    token = args.token or uuid.uuid4().hex
+    conn.execute("INSERT OR REPLACE INTO users(name,token,role,created_at) VALUES(?,?,?,?)",
+                 (args.name, token, args.role or "writer", now()))
+    conn.commit()
+    print(f"{args.name} {token}")
+
+
 def cmd_mirror(args):
     host = args.host
     if not host:
@@ -2976,7 +3081,13 @@ def cmd_serve(args):
         def do_POST(self):
             from urllib.parse import parse_qs
             token = args.token or os.environ.get("HERDR_THREAD_SERVE_TOKEN")
-            if token and self.headers.get("X-Herdr-Token") != token and parse_qs(urlparse(self.path).query).get("token", [None])[0] != token:
+            supplied = self.headers.get("X-Herdr-Token") or parse_qs(urlparse(self.path).query).get("token", [None])[0]
+            author = "web"
+            conn0 = db()
+            user = conn0.execute("SELECT * FROM users WHERE token=?", (supplied or "",)).fetchone()
+            if user:
+                author = user["name"]
+            if token and supplied != token:
                 self.send_response(403)
                 self.end_headers()
                 self.wfile.write(b"forbidden")
@@ -2997,8 +3108,8 @@ def cmd_serve(args):
                 body = (form.get("body") or [""])[0].strip()
                 if body:
                     if path.endswith("/comment"):
-                        conn.execute("INSERT INTO comments(thread_id,file,line,body,created_at) VALUES(?,?,?,?,?)",
-                                     (r["id"], (form.get("file") or [""])[0], int((form.get("line") or ["0"])[0] or 0), body, now()))
+                        conn.execute("INSERT INTO comments(thread_id,file,line,body,created_at,author) VALUES(?,?,?,?,?,?)",
+                                     (r["id"], (form.get("file") or [""])[0], int((form.get("line") or ["0"])[0] or 0), body, now(), author))
                     else:
                         record_turn(conn, r["id"], "note", body)
                     conn.commit()
@@ -3165,6 +3276,7 @@ def build_parser():
     cm.add_argument("--import", dest="import_file")
     cm.add_argument("--export", dest="export_file")
     cm.add_argument("--from-clipboard", action="store_true")
+    cm.add_argument("--from-reviewr", action="store_true")
     cm.set_defaults(func=cmd_comment)
 
     at = sub.add_parser("attach", help="attach a file to a thread worktree")
@@ -3190,6 +3302,7 @@ def build_parser():
     rv.add_argument("--role")
     rv.add_argument("--agent")
     rv.add_argument("--reviewer-prompt")
+    rv.add_argument("--sync-reviewr", action="store_true", help="import comments written by patched reviewr")
     rv.set_defaults(func=cmd_review)
 
     c = sub.add_parser("checkpoint", help="commit / list / restore checkpoints")
@@ -3398,6 +3511,13 @@ def build_parser():
     sh.add_argument("--review", action="store_true", help="write a standalone review HTML bundle")
     sh.add_argument("--html", action="store_true")
     sh.set_defaults(func=cmd_share)
+
+    usr = sub.add_parser("user", help="serve users/tokens")
+    usr.add_argument("action", choices=["list", "add", "remove"])
+    usr.add_argument("name", nargs="?")
+    usr.add_argument("--token")
+    usr.add_argument("--role", default="writer", choices=["reader", "writer", "admin"])
+    usr.set_defaults(func=cmd_user)
 
     mi = sub.add_parser("mirror", help="mirror remote herdr-thread list into local DB")
     mi.add_argument("machine")
