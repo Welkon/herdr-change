@@ -2946,8 +2946,8 @@ KEYS_BLOCK = """
 [[keys.command]]
 key = "prefix+t"
 type = "popup"
-width = "56%"
-height = "38%"
+width = "52%"
+height = "30%"
 command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-task-$$; /home/felix/.local/bin/herdr-thread ui task --result \"$result\" 2>>/tmp/herdr-thread-ui.log; task=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
 description = "herdr-thread: new task"
 
@@ -2960,11 +2960,35 @@ description = "herdr-thread: review current"
 [[keys.command]]
 key = "prefix+alt+d"
 type = "popup"
-width = "56%"
-height = "46%"
+width = "52%"
+height = "40%"
 command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-done-$$; /home/felix/.local/bin/herdr-thread ui done --result \"$result\" 2>>/tmp/herdr-thread-ui.log; ans=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
 description = "herdr-thread: done current"
 """
+
+
+def _ui_colors():
+    import curses
+
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+        if curses.COLORS >= 256:
+            curses.init_pair(1, 141, -1)   # dracula purple
+            curses.init_pair(2, 117, -1)   # dracula cyan
+            curses.init_pair(3, 228, -1)   # dracula yellow
+            curses.init_pair(4, 252, 237)  # muted button background
+            curses.init_pair(5, 235, 61)   # selected row
+            curses.init_pair(6, 61, -1)    # comment/muted
+        else:
+            curses.init_pair(1, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(2, curses.COLOR_CYAN, -1)
+            curses.init_pair(3, curses.COLOR_YELLOW, -1)
+            curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)
+            curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_CYAN)
+            curses.init_pair(6, curses.COLOR_WHITE, -1)
+    except curses.error:
+        pass
 
 
 def _display_width(text: str) -> int:
@@ -2982,26 +3006,19 @@ def _ui_task():
 
     def draw(stdscr):
         curses.curs_set(1)
-        try:
-            curses.start_color()
-            curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_MAGENTA, -1)
-            curses.init_pair(2, curses.COLOR_CYAN, -1)
-            curses.init_pair(3, curses.COLOR_YELLOW, -1)
-        except curses.error:
-            pass
+        _ui_colors()
         text = ""
         while True:
             h, w = stdscr.getmaxyx()
             stdscr.erase()
             bw = max(36, min(w - 8, 68))
             x = max(2, (w - bw) // 2)
-            y = max(0, (h - 7) // 2)
-            footer = min(max(y + 7, 6), max(0, h - 2))
+            y = 1
+            footer = min(y + 8, max(0, h - 2))
             try:
                 stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
                 stdscr.addnstr(y, x, "herdr-thread", bw)
-                stdscr.attrset(curses.A_DIM)
+                stdscr.attrset(curses.color_pair(6))
                 stdscr.addnstr(y, x + 13, "  new task", bw - 13)
                 stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
                 stdscr.addnstr(y + 3, x, "Task", bw)
@@ -3009,13 +3026,13 @@ def _ui_task():
                 stdscr.addnstr(y + 4, x, "\u203a ", 2)
                 field = text[-(bw - 3):]
                 stdscr.addnstr(y + 4, x + 2, field, bw - 2)
-                stdscr.attrset(curses.A_DIM)
+                stdscr.attrset(curses.color_pair(6))
                 for i in range(min(bw, w - x - 1)):
                     stdscr.addch(y + 5, x + i, curses.ACS_HLINE)
-                stdscr.attrset(curses.A_REVERSE | curses.A_BOLD)
-                stdscr.addnstr(footer, x, " Enter  OK ", 10)
-                stdscr.attrset(curses.A_REVERSE)
-                stdscr.addnstr(footer, x + 12, " Esc  Cancel ", 13)
+                stdscr.attrset(curses.color_pair(4) | curses.A_BOLD)
+                stdscr.addnstr(footer, x, "  Enter  OK  ", 13)
+                stdscr.attrset(curses.color_pair(4))
+                stdscr.addnstr(footer, x + 15, "  Esc  Cancel  ", 15)
                 stdscr.attrset(curses.A_NORMAL)
                 stdscr.move(y + 4, x + 2 + _display_width(field))
                 stdscr.refresh()
@@ -3048,45 +3065,38 @@ def _ui_done():
 
     def draw(stdscr):
         curses.curs_set(0)
-        try:
-            curses.start_color()
-            curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_MAGENTA, -1)
-            curses.init_pair(2, curses.COLOR_CYAN, -1)
-            curses.init_pair(3, curses.COLOR_YELLOW, -1)
-        except curses.error:
-            pass
+        _ui_colors()
         selected = 0
         while True:
             h, w = stdscr.getmaxyx()
             stdscr.erase()
             bw = max(40, min(w - 8, 68))
             x = max(2, (w - bw) // 2)
-            y = max(0, (h - 8) // 2)
-            footer = max(0, h - 2)
+            y = 1
+            footer = min(y + 8, max(0, h - 2))
             try:
                 stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
                 stdscr.addnstr(y, x, "herdr-thread", bw)
-                stdscr.attrset(curses.A_DIM)
+                stdscr.attrset(curses.color_pair(6))
                 stdscr.addnstr(y, x + 13, "  finish", bw - 13)
                 stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
                 stdscr.addnstr(y + 2, x, "What next?", bw)
                 for i, (key, label, hint) in enumerate(options):
                     row = y + 3 + i
                     if i == selected:
-                        stdscr.attrset(curses.A_REVERSE | curses.A_BOLD)
+                        stdscr.attrset(curses.color_pair(5) | curses.A_BOLD)
                         stdscr.addnstr(row, x, f"  {label}  ", bw)
-                        stdscr.attrset(curses.A_REVERSE | curses.A_DIM)
+                        stdscr.attrset(curses.color_pair(5) | curses.A_DIM)
                         stdscr.addnstr(row, x + len(label) + 4, hint, max(1, bw - len(label) - 5))
                     else:
-                        stdscr.attrset(curses.A_NORMAL)
+                        stdscr.attrset(curses.color_pair(4))
                         stdscr.addnstr(row, x, f"  {label}  ", bw)
-                        stdscr.attrset(curses.A_DIM)
+                        stdscr.attrset(curses.color_pair(6))
                         stdscr.addnstr(row, x + len(label) + 4, hint, max(1, bw - len(label) - 5))
-                stdscr.attrset(curses.A_REVERSE | curses.A_BOLD)
-                stdscr.addnstr(footer, x, " Enter  Select ", 14)
-                stdscr.attrset(curses.A_REVERSE)
-                stdscr.addnstr(footer, x + 16, " Esc  Cancel ", 13)
+                stdscr.attrset(curses.color_pair(4) | curses.A_BOLD)
+                stdscr.addnstr(footer, x, "  Enter  Select  ", 17)
+                stdscr.attrset(curses.color_pair(4))
+                stdscr.addnstr(footer, x + 19, "  Esc  Cancel  ", 15)
                 stdscr.attrset(curses.A_NORMAL)
                 stdscr.refresh()
             except curses.error:
