@@ -1942,6 +1942,38 @@ def cmd_open(args):
     print(f"focused {r['workspace_id']}  ({r['label']})")
 
 
+def thread_for_path(conn, path: str):
+    target = Path(path).resolve()
+    rows = conn.execute("SELECT * FROM threads WHERE archived=0").fetchall()
+    for r in rows:
+        for rr in repo_rows(conn, r):
+            wt = Path(rr["worktree"]).resolve()
+            if target == wt or wt in target.parents:
+                return r
+    return None
+
+
+def cmd_review_here(args):
+    conn = db()
+    path = args.path or os.environ.get("HERDR_ACTIVE_PANE_CWD") or os.getcwd()
+    r = thread_for_path(conn, path)
+    if not r:
+        die(f"no herdr-thread for cwd: {path}")
+    cmd_review(argparse.Namespace(id=r["id"], verdict=None, reviewer=args.reviewer,
+                                  profile="reviewer", role=None, agent=args.agent,
+                                  reviewer_prompt=None, sync_reviewr=args.sync_reviewr))
+
+
+def cmd_done_here(args):
+    conn = db()
+    path = args.path or os.environ.get("HERDR_ACTIVE_PANE_CWD") or os.getcwd()
+    r = thread_for_path(conn, path)
+    if not r:
+        die(f"no herdr-thread for cwd: {path}")
+    cmd_done(argparse.Namespace(id=r["id"], strategy=None, into=None, pr=args.pr,
+                                cleanup=args.cleanup, delete_branch=False, message=None))
+
+
 def cmd_children(args):
     conn = db()
     r = thread_row(conn, args.id)
@@ -2909,6 +2941,40 @@ def cmd_prune(args):
         print("nothing to prune")
 
 
+KEYS_BLOCK = """
+# herdr-thread keybindings
+[[keys.command]]
+key = "prefix+t"
+type = "popup"
+command = "printf 'Task: '; read -r task; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
+description = "herdr-thread: new task"
+
+[[keys.command]]
+key = "prefix+alt+r"
+type = "pane"
+command = "exec /home/felix/.local/bin/herdr-thread review-here --reviewer --sync-reviewr"
+description = "herdr-thread: review current"
+
+[[keys.command]]
+key = "prefix+alt+d"
+type = "popup"
+command = "printf 'Done: [p] push, [r] push+PR, [c] cancel: '; read -r ans; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
+description = "herdr-thread: done current"
+"""
+
+
+def cmd_install_keys(args):
+    path = HOME / ".config" / "herdr" / "config.toml"
+    text = path.read_text() if path.exists() else ""
+    if "herdr-thread: new task" in text:
+        print("herdr-thread keybindings already present")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.rstrip() + "\n" + KEYS_BLOCK)
+    print(f"installed keybindings in {path}")
+    print("run: herdr server reload-config")
+
+
 def cmd_config(args):
     cfg = load_config()
     if args.action == "path":
@@ -3399,6 +3465,19 @@ def build_parser():
     o.add_argument("id")
     o.set_defaults(func=cmd_open)
 
+    rh = sub.add_parser("review-here", help="review the thread containing the current cwd")
+    rh.add_argument("--path")
+    rh.add_argument("--reviewer", action="store_true")
+    rh.add_argument("--agent")
+    rh.add_argument("--sync-reviewr", action="store_true")
+    rh.set_defaults(func=cmd_review_here)
+
+    dh = sub.add_parser("done-here", help="checkpoint + push/PR the thread containing cwd")
+    dh.add_argument("--path")
+    dh.add_argument("--pr", action="store_true")
+    dh.add_argument("--cleanup", action="store_true")
+    dh.set_defaults(func=cmd_done_here)
+
     ch = sub.add_parser("children", help="show child threads")
     ch.add_argument("id")
     ch.add_argument("--json", action="store_true")
@@ -3606,6 +3685,9 @@ def build_parser():
     pn.add_argument("--dry-run", action="store_true")
     pn.add_argument("--yes", action="store_true")
     pn.set_defaults(func=cmd_prune)
+
+    ik = sub.add_parser("install-keys", help="install herdr keybindings")
+    ik.set_defaults(func=cmd_install_keys)
 
     cf = sub.add_parser("config", help="show effective config / paths")
     cf.add_argument("action", choices=["show", "path", "set"])

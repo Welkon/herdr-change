@@ -18,6 +18,21 @@ Delta 式「线程 + worktree + Agent + 审查 + 落地」工作流，构建在 
 
 本机已链接到 `~/.local/bin/herdr-thread`。
 
+## Herdr 键位（推荐）
+
+```text
+prefix+t        新建任务（弹窗输入）
+prefix+alt+r    审查当前 worktree 对应线程
+prefix+alt+d    完成当前线程（push / push+PR）
+```
+
+安装/修复：
+
+```bash
+herdr-thread install-keys
+herdr server reload-config
+```
+
 ## 最简用法（日常只用 3 条）
 
 ```bash
