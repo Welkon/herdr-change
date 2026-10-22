@@ -8,6 +8,7 @@ import html
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -483,6 +484,23 @@ def create_extra_worktree(repo: str, branch: str, base_ref: str, path: str) -> s
     return base_sha
 
 
+def apply_provider(conn, name: str, pane_id: str):
+    row = conn.execute("SELECT * FROM providers WHERE name=?", (name,)).fetchone()
+    if not row:
+        raise RuntimeError(f"unknown provider: {name}")
+    envs = {}
+    if row["base_url"]:
+        envs["OPENAI_BASE_URL"] = row["base_url"]
+    if row["api_key"]:
+        envs["OPENAI_API_KEY"] = row["api_key"]
+    if not envs:
+        return
+    cmd = "; ".join(f"export {k}={shlex.quote(v)}" for k, v in envs.items())
+    p = subprocess.run(["herdr", "pane", "run", pane_id, cmd], text=True, capture_output=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"failed to apply provider env: {p.stderr.strip() or p.stdout.strip()}")
+
+
 def cmd_new(args):
     cfg = load_config()
     conn = db()
@@ -552,6 +570,9 @@ def cmd_new(args):
             run(["git", "-C", x["repo"], "worktree", "remove", "--force", x["worktree"]], check=False)
         herdr("worktree", "remove", "--workspace", workspace_id, "--force")
         die(str(e))
+
+    if getattr(args, "provider", None):
+        apply_provider(conn, args.provider, pane_id)
 
     profile = cfg["roles"].get(args.role, {}) if getattr(args, "role", None) else {}
     if not profile:
@@ -1016,15 +1037,16 @@ def cmd_comment(args):
             for x in rows
         )
         text = f"Review comments for thread {r['label']} ({r['id']}):\n{body}\nAddress them and report the changes."
-        target = r["agent_name"] or r["pane_id"]
+        target_thread = thread_row(conn, args.to) if args.to else r
+        target = target_thread["agent_name"] or target_thread["pane_id"]
         if not target:
-            die("thread has no agent")
+            die("target thread has no agent")
         herdr("agent", "prompt", target, text)
         conn.execute("UPDATE comments SET status='sent', sent_at=? WHERE thread_id=? AND status='open'",
                      (now(), r["id"]))
         conn.commit()
-        record_turn(conn, r["id"], "user", text, '{"kind":"comments"}')
-        print(f"sent {len(rows)} comments to {target}")
+        record_turn(conn, target_thread["id"], "user", text, '{"kind":"comments"}')
+        print(f"sent {len(rows)} comments from {r['id']} to {target_thread['id']} ({target})")
         return
     if not args.text:
         die("comment text required (or --list/--send/--resolve)")
@@ -2911,6 +2933,7 @@ def build_parser():
     n.add_argument("--agent", help="agent kind (codex/claude/pi/...)")
     n.add_argument("--profile", help="profile name from config.toml")
     n.add_argument("--role", help="model role from config.toml [roles.*]")
+    n.add_argument("--provider", help="provider name from `provider add`")
     n.add_argument("--no-agent", action="store_true")
     n.add_argument("--prompt")
     n.add_argument("--tag")
@@ -2991,6 +3014,7 @@ def build_parser():
     cm.add_argument("--line", type=int)
     cm.add_argument("--list", action="store_true")
     cm.add_argument("--send", action="store_true")
+    cm.add_argument("--to", help="send comments to another thread")
     cm.add_argument("--resolve", type=int)
     cm.add_argument("--json", action="store_true")
     cm.set_defaults(func=cmd_comment)
