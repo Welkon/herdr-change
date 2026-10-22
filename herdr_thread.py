@@ -2946,7 +2946,7 @@ KEYS_BLOCK = """
 [[keys.command]]
 key = "prefix+t"
 type = "popup"
-command = "if command -v whiptail >/dev/null 2>&1; then task=$(whiptail --title 'herdr-thread' --inputbox 'Task:' 10 72 3>&1 1>&2 2>&3) || exit 0; else printf 'Task (Ctrl+C cancel): '; trap 'exit 0' INT; read -r task; fi; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
+command = "task=$(/home/felix/.local/bin/herdr-thread ui task) || exit 0; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
 description = "herdr-thread: new task"
 
 [[keys.command]]
@@ -2958,9 +2958,146 @@ description = "herdr-thread: review current"
 [[keys.command]]
 key = "prefix+alt+d"
 type = "popup"
-command = "if command -v whiptail >/dev/null 2>&1; then ans=$(whiptail --title 'herdr-thread' --menu 'Done?' 15 64 3 p 'checkpoint + push' r 'checkpoint + push + PR' c 'cancel' 3>&1 1>&2 2>&3) || exit 0; else printf 'Done: [p] push, [r] push+PR, [c] cancel: '; trap 'exit 0' INT; read -r ans; fi; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
+command = "ans=$(/home/felix/.local/bin/herdr-thread ui done) || exit 0; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
 description = "herdr-thread: done current"
 """
+
+
+def _ui_task():
+    import curses
+
+    def draw(stdscr):
+        curses.curs_set(1)
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(2, curses.COLOR_CYAN, -1)
+            curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        except curses.error:
+            pass
+        text = ""
+        while True:
+            h, w = stdscr.getmaxyx()
+            stdscr.erase()
+            bw = max(36, min(w - 8, 76))
+            x = max(2, (w - bw) // 2)
+            y = max(2, (h - 7) // 2)
+            try:
+                stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
+                stdscr.addnstr(y, x, "herdr-thread", bw)
+                stdscr.attrset(curses.A_DIM)
+                stdscr.addnstr(y, x + 13, "  new task", bw - 13)
+                stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
+                stdscr.addnstr(y + 3, x, "Task", bw)
+                stdscr.attrset(curses.A_NORMAL)
+                stdscr.addnstr(y + 4, x, "\u203a ", 2)
+                field = text[-(bw - 3):]
+                stdscr.addnstr(y + 4, x + 2, field, bw - 2)
+                stdscr.move(y + 4, x + 2 + len(field))
+                stdscr.attrset(curses.A_DIM)
+                try:
+                    for i in range(min(bw, w - x - 1)):
+                        stdscr.addch(y + 5, x + i, curses.ACS_HLINE)
+                except curses.error:
+                    pass
+                stdscr.attrset(curses.color_pair(3))
+                stdscr.addnstr(y + 7, x, "Enter create  \u00b7  Esc cancel  \u00b7  Ctrl+C quit", bw)
+                stdscr.attrset(curses.A_NORMAL)
+                stdscr.refresh()
+            except curses.error:
+                pass
+            try:
+                ch = stdscr.get_wch()
+            except curses.error:
+                continue
+            if ch == "\x1b":
+                return None
+            if ch in ("\n", "\r", curses.KEY_ENTER):
+                return text.strip() or None
+            if ch in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                text = text[:-1]
+            elif isinstance(ch, str) and ch.isprintable():
+                text += ch
+
+    return curses.wrapper(draw)
+
+
+def _ui_done():
+    import curses
+
+    options = [
+        ("p", "Checkpoint + push", "land on origin"),
+        ("r", "Checkpoint + push + PR", "create a pull request"),
+        ("c", "Cancel", ""),
+    ]
+
+    def draw(stdscr):
+        curses.curs_set(0)
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(2, curses.COLOR_CYAN, -1)
+            curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        except curses.error:
+            pass
+        selected = 0
+        while True:
+            h, w = stdscr.getmaxyx()
+            stdscr.erase()
+            bw = max(40, min(w - 8, 72))
+            x = max(2, (w - bw) // 2)
+            y = max(2, (h - 10) // 2)
+            try:
+                stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
+                stdscr.addnstr(y, x, "herdr-thread", bw)
+                stdscr.attrset(curses.A_DIM)
+                stdscr.addnstr(y, x + 13, "  finish", bw - 13)
+                stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
+                stdscr.addnstr(y + 2, x, "What next?", bw)
+                for i, (key, label, hint) in enumerate(options):
+                    row = y + 4 + i
+                    if i == selected:
+                        stdscr.attrset(curses.A_REVERSE | curses.A_BOLD)
+                        stdscr.addnstr(row, x, f"  {label}  ", bw)
+                        stdscr.attrset(curses.A_REVERSE | curses.A_DIM)
+                        stdscr.addnstr(row, x + len(label) + 4, hint, max(1, bw - len(label) - 5))
+                    else:
+                        stdscr.attrset(curses.A_NORMAL)
+                        stdscr.addnstr(row, x, f"  {label}  ", bw)
+                        stdscr.attrset(curses.A_DIM)
+                        stdscr.addnstr(row, x + len(label) + 4, hint, max(1, bw - len(label) - 5))
+                stdscr.attrset(curses.color_pair(3))
+                stdscr.addnstr(y + 9, x, "\u2191\u2193 move  \u00b7  Enter select  \u00b7  Esc cancel", bw)
+                stdscr.attrset(curses.A_NORMAL)
+                stdscr.refresh()
+            except curses.error:
+                pass
+            try:
+                ch = stdscr.get_wch()
+            except curses.error:
+                continue
+            if ch == "\x1b":
+                return None
+            if ch in (curses.KEY_UP, "k"):
+                selected = (selected - 1) % len(options)
+            elif ch in (curses.KEY_DOWN, "j", "\t"):
+                selected = (selected + 1) % len(options)
+            elif ch in ("\n", "\r", curses.KEY_ENTER):
+                return options[selected][0]
+            elif isinstance(ch, str):
+                for k, _, _ in options:
+                    if ch == k:
+                        return k
+
+    return curses.wrapper(draw)
+
+
+def cmd_ui(args):
+    value = _ui_task() if args.kind == "task" else _ui_done()
+    if value:
+        print(value)
 
 
 def cmd_install_keys(args):
@@ -3685,6 +3822,10 @@ def build_parser():
     pn.add_argument("--dry-run", action="store_true")
     pn.add_argument("--yes", action="store_true")
     pn.set_defaults(func=cmd_prune)
+
+    ui = sub.add_parser("ui", help="interactive task/done UI used by herdr keybindings")
+    ui.add_argument("kind", choices=["task", "done"])
+    ui.set_defaults(func=cmd_ui)
 
     ik = sub.add_parser("install-keys", help="install herdr keybindings")
     ik.set_defaults(func=cmd_install_keys)
