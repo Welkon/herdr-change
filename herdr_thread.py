@@ -2946,6 +2946,8 @@ KEYS_BLOCK = """
 [[keys.command]]
 key = "prefix+t"
 type = "popup"
+width = "72%"
+height = "32%"
 command = "task=$(/home/felix/.local/bin/herdr-thread ui task) || exit 0; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
 description = "herdr-thread: new task"
 
@@ -2958,6 +2960,8 @@ description = "herdr-thread: review current"
 [[keys.command]]
 key = "prefix+alt+d"
 type = "popup"
+width = "72%"
+height = "45%"
 command = "ans=$(/home/felix/.local/bin/herdr-thread ui done) || exit 0; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
 description = "herdr-thread: done current"
 """
