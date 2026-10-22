@@ -21,9 +21,9 @@ Delta 式「线程 + worktree + Agent + 审查 + 落地」工作流，构建在 
 ## Herdr 键位（推荐）
 
 ```text
-prefix+t        新建任务（弹窗输入）
+prefix+t        新建任务（whiptail 弹窗，Esc/Cancel 退出）
 prefix+alt+r    审查当前 worktree 对应线程
-prefix+alt+d    完成当前线程（push / push+PR）
+prefix+alt+d    完成当前线程（菜单选 push / push+PR / cancel）
 ```
 
 安装/修复：

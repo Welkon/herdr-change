@@ -2946,7 +2946,7 @@ KEYS_BLOCK = """
 [[keys.command]]
 key = "prefix+t"
 type = "popup"
-command = "printf 'Task: '; read -r task; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
+command = "if command -v whiptail >/dev/null 2>&1; then task=$(whiptail --title 'herdr-thread' --inputbox 'Task:' 10 72 3>&1 1>&2 2>&3) || exit 0; else printf 'Task (Ctrl+C cancel): '; trap 'exit 0' INT; read -r task; fi; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
 description = "herdr-thread: new task"
 
 [[keys.command]]
@@ -2958,7 +2958,7 @@ description = "herdr-thread: review current"
 [[keys.command]]
 key = "prefix+alt+d"
 type = "popup"
-command = "printf 'Done: [p] push, [r] push+PR, [c] cancel: '; read -r ans; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
+command = "if command -v whiptail >/dev/null 2>&1; then ans=$(whiptail --title 'herdr-thread' --menu 'Done?' 15 64 3 p 'checkpoint + push' r 'checkpoint + push + PR' c 'cancel' 3>&1 1>&2 2>&3) || exit 0; else printf 'Done: [p] push, [r] push+PR, [c] cancel: '; trap 'exit 0' INT; read -r ans; fi; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
 description = "herdr-thread: done current"
 """
 
