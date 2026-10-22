@@ -777,6 +777,8 @@ def cmd_machines(args):
 
 
 def cmd_remote(args):
+    if not args.rest:
+        die("usage: herdr-thread remote <machine> <herdr args...>  (e.g. agent list)")
     cmd = ["herdr"]
     if args.machine:
         cmd += ["--machine", args.machine]
