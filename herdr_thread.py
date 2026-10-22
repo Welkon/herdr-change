@@ -2948,7 +2948,7 @@ key = "prefix+t"
 type = "popup"
 width = "72%"
 height = "32%"
-command = "export TERM=\"${TERM:-xterm-256color}\"; task=$(/home/felix/.local/bin/herdr-thread ui task 2>>/tmp/herdr-thread-ui.log) || exit 0; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
+command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-task-$$; /home/felix/.local/bin/herdr-thread ui task --result \"$result\" 2>>/tmp/herdr-thread-ui.log; task=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
 description = "herdr-thread: new task"
 
 [[keys.command]]
@@ -2962,7 +2962,7 @@ key = "prefix+alt+d"
 type = "popup"
 width = "72%"
 height = "45%"
-command = "export TERM=\"${TERM:-xterm-256color}\"; ans=$(/home/felix/.local/bin/herdr-thread ui done 2>>/tmp/herdr-thread-ui.log) || exit 0; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
+command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-done-$$; /home/felix/.local/bin/herdr-thread ui done --result \"$result\" 2>>/tmp/herdr-thread-ui.log; ans=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
 description = "herdr-thread: done current"
 """
 
@@ -3107,7 +3107,13 @@ def cmd_ui(args):
             value = input("Task: " if args.kind == "task" else "Done [p/r/c]: ").strip()
         except (EOFError, KeyboardInterrupt):
             value = None
-    if value:
+    if args.result:
+        path = Path(args.result)
+        if value:
+            path.write_text(value + "\n")
+        else:
+            path.unlink(missing_ok=True)
+    elif value:
         print(value)
 
 
@@ -3836,6 +3842,7 @@ def build_parser():
 
     ui = sub.add_parser("ui", help="interactive task/done UI used by herdr keybindings")
     ui.add_argument("kind", choices=["task", "done"])
+    ui.add_argument("--result", help="write selection to this file instead of stdout")
     ui.set_defaults(func=cmd_ui)
 
     ik = sub.add_parser("install-keys", help="install herdr keybindings")
