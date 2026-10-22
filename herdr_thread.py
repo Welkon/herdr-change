@@ -32,14 +32,17 @@ DEFAULT_CONFIG = {
     "profiles": {
         "worker": {
             "kind": "codex",
+            "args": [],
             "prompt": "你是实现子 Agent。只做被指派的子任务，完成后总结改动文件和验证方式。",
         },
         "scout": {
             "kind": "codex",
+            "args": [],
             "prompt": "你是调研子 Agent。只读代码并给出结论，不修改任何文件。",
         },
         "reviewer": {
             "kind": "codex",
+            "args": [],
             "prompt": "你是审查子 Agent。只读 diff，按文件列出风险、遗漏测试和回退建议，不改文件。",
         },
     },
@@ -88,6 +91,8 @@ def db() -> sqlite3.Connection:
             workspace_id TEXT,
             pane_id TEXT,
             review_pane_id TEXT,
+            reviewer_pane_id TEXT,
+            reviewer_agent TEXT,
             agent_name TEXT,
             agent_kind TEXT,
             status TEXT NOT NULL DEFAULT 'created',
@@ -102,6 +107,10 @@ def db() -> sqlite3.Connection:
         )
         """
     )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
+    for col in ("reviewer_pane_id", "reviewer_agent"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE threads ADD COLUMN {col} TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS events (
@@ -238,6 +247,37 @@ def status_line(row, states: dict, info: dict) -> str:
     return f"{row['id']}  {row['label'][:24]:24}  {astate:8}  {row['status']:8}{rev:14} {flags_s}"
 
 
+# ---------- hooks ----------
+
+def run_hooks(wt: str, conn, tid: str):
+    """Run .agents/prepare then .agents/setup (.delta/setup wins)."""
+    hooks = [".agents/prepare", ".agents/setup"]
+    if Path(wt, ".delta", "setup").exists():
+        hooks[-1] = ".delta/setup"
+    for rel in hooks:
+        path = Path(wt) / rel
+        if not path.exists():
+            continue
+        if not os.access(path, os.X_OK):
+            print(f"  hook      {rel} (not executable, skipped)", file=sys.stderr)
+            continue
+        print(f"  hook      {rel}")
+        r = subprocess.run([str(path)], cwd=wt, text=True, capture_output=True)
+        status = "ok" if r.returncode == 0 else f"failed({r.returncode})"
+        event(conn, tid, "hook", f"{rel} {status}")
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout or "").strip().splitlines()[-5:]
+            print(f"  hook      {rel} {status}: " + " | ".join(tail), file=sys.stderr)
+        else:
+            print(f"  hook      {rel} ok")
+
+
+def cmd_setup(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    run_hooks(r["worktree"], conn, r["id"])
+
+
 # ---------- commands ----------
 
 def cmd_new(args):
@@ -286,12 +326,15 @@ def cmd_new(args):
         time.sleep(0.4)
         review_pane = find_review_pane(workspace_id)
 
+    profile = cfg["profiles"].get(args.profile, {}) if getattr(args, "profile", None) else {}
     agent_name = None
     agent_kind = None
+    agent_args: list[str] = []
     if not args.no_agent:
-        agent_kind = args.agent or cfg["default_agent"]
+        agent_kind = args.agent or profile.get("kind") or cfg["default_agent"]
+        agent_args = list(profile.get("args") or [])
         agent_name = f"ht-{tid}"
-        start_res = start_agent(agent_name, agent_kind, pane_id, workspace_id, wt)
+        start_res = start_agent(agent_name, agent_kind, pane_id, workspace_id, wt, agent_args)
         if start_res:
             agent_name = start_res
 
@@ -319,19 +362,32 @@ def cmd_new(args):
         print(f"  reviewr   {review_pane}")
     if agent_name:
         print(f"  agent     {agent_name} ({agent_kind})")
-    if args.prompt and agent_name:
-        herdr("agent", "prompt", agent_name, args.prompt)
+    initial_prompt = args.prompt
+    if initial_prompt is None and args.profile and profile.get("prompt"):
+        initial_prompt = profile["prompt"]
+    if initial_prompt and agent_name:
+        herdr("agent", "prompt", agent_name, initial_prompt)
         print("  prompt    sent")
+    if getattr(args, "run_hooks", False):
+        run_hooks(wt, conn, tid)
     if args.focus:
         herdr("workspace", "focus", workspace_id)
     return tid
 
 
-def start_agent(name: str, kind: str, pane_id: str, workspace_id: str, cwd: str) -> str | None:
+def start_agent(name: str, kind: str, pane_id: str, workspace_id: str, cwd: str,
+                agent_args: list[str] | None = None) -> str | None:
     last = ""
+    extra = list(agent_args or [])
     for attempt in range(3):
         try:
-            herdr("agent", "start", name, "--kind", kind, "--pane", pane_id, "--timeout", "60000")
+            cmd = ["herdr", "agent", "start", name, "--kind", kind, "--pane", pane_id, "--timeout", "60000"]
+            if extra:
+                cmd += ["--", *extra]
+            p = subprocess.run(cmd, text=True, capture_output=True)
+            if p.returncode != 0:
+                raw = (p.stderr or p.stdout or "").strip()
+                raise RuntimeError(raw[:500])
             return name
         except Exception as e:
             last = str(e)
@@ -386,6 +442,8 @@ def cmd_show(args):
     print(f"  worktree    {r['worktree']}")
     print(f"  branch      {r['branch']}  base={r['base_ref']}")
     print(f"  workspace   {r['workspace_id']}  agent_pane={r['pane_id']}  reviewr={r['review_pane_id'] or '-'}")
+    if r["reviewer_agent"]:
+        print(f"  reviewer    {r['reviewer_agent']} ({r['reviewer_pane_id'] or '-'})")
     print(f"  git         head={info['head']} dirty={info['dirty']} ahead={info['ahead'] or '-'} behind={info['behind'] or '-'}")
     if r["tags"]:
         print(f"  tags        {r['tags']}")
@@ -418,6 +476,7 @@ def cmd_prompt(args):
 
 
 def cmd_review(args):
+    cfg = load_config()
     conn = db()
     r = thread_row(conn, args.id)
     ws = r["workspace_id"]
@@ -426,7 +485,6 @@ def cmd_review(args):
     review_pane = r["review_pane_id"] or find_review_pane(ws)
     if not review_pane:
         try:
-            cfg = load_config()
             herdr("plugin", "pane", "open",
                   "--plugin", cfg["review_plugin"], "--entrypoint", cfg["review_entrypoint"],
                   "--workspace", ws, "--placement", "split", "--direction", "right",
@@ -438,12 +496,50 @@ def cmd_review(args):
                  (args.verdict or r["review_state"] or "pending", review_pane, r["id"]))
     conn.commit()
     event(conn, r["id"], "review", args.verdict or "opened")
+
+    reviewer_agent = r["reviewer_agent"]
+    reviewer_pane = r["reviewer_pane_id"]
+    if args.reviewer and not reviewer_agent:
+        profile = cfg["profiles"].get(args.profile or "reviewer", {})
+        kind = args.agent or profile.get("kind") or cfg["default_agent"]
+        try:
+            split = herdr("pane", "split", r["pane_id"], "--direction", "down",
+                          "--cwd", r["worktree"], "--no-focus")
+            rp = split.get("pane", {}).get("pane_id")
+            if not rp:
+                raise RuntimeError(f"unexpected split result: {split}")
+            reviewer_agent = f"ht-{r['id']}-rev"
+            start_agent(reviewer_agent, kind, rp, ws, r["worktree"], list(profile.get("args") or []))
+            base_prompt = args.reviewer_prompt or profile.get("prompt") or "Review the current changes."
+            prompt = (
+                f"{base_prompt}\n\nThread: {r['label']} ({r['id']})\n"
+                f"Worktree: {r['worktree']}\nBranch: {r['branch']}\n"
+                f"Run `herdr-thread diff {r['id']}` for the full diff. "
+                "Report findings as file:line, severity, and a concrete fix. Do not modify files."
+            )
+            herdr("agent", "prompt", reviewer_agent, prompt)
+            reviewer_pane = rp
+            conn.execute("UPDATE threads SET reviewer_pane_id=?, reviewer_agent=? WHERE id=?",
+                         (rp, reviewer_agent, r["id"]))
+            conn.commit()
+        except Exception as e:
+            print(f"warning: could not start reviewer: {e}", file=sys.stderr)
+            reviewer_agent = None
+
     print(f"review thread {r['id']}  worktree={r['worktree']}")
     if review_pane:
         print(f"  reviewr pane {review_pane} (diff scopes: uncommitted/branch/last-turn/commits)")
+    if reviewer_agent:
+        print(f"  reviewer     {reviewer_agent} ({reviewer_pane or '-'})")
     print("  verdict: herdr-thread review %s --verdict approved|rejected" % r["id"])
     if args.verdict:
         print(f"  review_state = {args.verdict}")
+        if cfg.get("notify", True):
+            try:
+                herdr("notification", "show", f"Review {args.verdict}: {r['label']}",
+                      "--body", r["branch"], "--sound", "done" if args.verdict == "approved" else "request")
+            except Exception:
+                pass
 
 
 def cmd_checkpoint(args):
@@ -640,7 +736,7 @@ def cmd_fork(args):
         label=args.label, repo=parent["repo"], base=base, branch=None, worktree=None,
         agent=args.agent or parent["agent_kind"], no_agent=args.no_agent,
         prompt=args.prompt, focus=args.focus, tag=None, parent=parent["id"],
-        trust_repository=False,
+        trust_repository=False, profile=None, run_hooks=False,
     )
     tid = cmd_new(ns)
     print(f"forked {parent['id']} -> {tid}")
@@ -658,10 +754,44 @@ def cmd_subagent(args):
         repo=parent["repo"], base=base, branch=None, worktree=None,
         agent=args.agent or profile.get("kind") or parent["agent_kind"],
         no_agent=False, prompt=prompt, focus=args.focus, tag=f"subagent,{args.profile}",
-        parent=parent["id"], trust_repository=False,
+        parent=parent["id"], trust_repository=False, profile=args.profile, run_hooks=False,
     )
     tid = cmd_new(ns)
     print(f"subagent {args.profile}: {parent['id']} -> {tid}")
+
+
+def cmd_machines(args):
+    p = subprocess.run(["herdr", "machine", "list", "--json"], text=True, capture_output=True)
+    raw = (p.stdout or "").strip()
+    if not raw:
+        die((p.stderr or "herdr machine list failed").strip())
+    machines = json.loads(raw)
+    if args.json:
+        print(json.dumps(machines, ensure_ascii=False, indent=2))
+        return
+    if not machines:
+        print("no saved machines (add one with: herdr machine add)")
+        return
+    for m in machines:
+        print(f"{m.get('id','?'):12}  {m.get('label',''):20}  {m.get('host','')}  enabled={m.get('enabled')}")
+
+
+def cmd_remote(args):
+    cmd = ["herdr"]
+    if args.machine:
+        cmd += ["--machine", args.machine]
+    cmd += args.rest
+    p = subprocess.run(cmd, text=True)
+    raise SystemExit(p.returncode)
+
+
+def cmd_notify(args):
+    hargs = ["notification", "show", args.title]
+    if args.body:
+        hargs += ["--body", args.body]
+    if args.sound:
+        hargs += ["--sound", args.sound]
+    herdr(*hargs)
 
 
 def cmd_doctor(args):
@@ -689,10 +819,12 @@ def build_parser():
     n.add_argument("--branch")
     n.add_argument("--worktree")
     n.add_argument("--agent", help="agent kind (codex/claude/pi/...)")
+    n.add_argument("--profile", help="profile name from config.toml")
     n.add_argument("--no-agent", action="store_true")
     n.add_argument("--prompt")
     n.add_argument("--tag")
     n.add_argument("--parent")
+    n.add_argument("--run-hooks", action="store_true", help="run .agents/prepare and .agents/setup")
     n.add_argument("--focus", action="store_true")
     n.add_argument("--no-focus", action="store_true")
     n.add_argument("--trust-repository", action="store_true")
@@ -711,6 +843,10 @@ def build_parser():
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_show)
 
+    su = sub.add_parser("setup", help="run .agents/prepare and .agents/setup in the worktree")
+    su.add_argument("id")
+    su.set_defaults(func=cmd_setup)
+
     pr = sub.add_parser("prompt", help="send a prompt to the thread's agent")
     pr.add_argument("id")
     pr.add_argument("text")
@@ -722,6 +858,10 @@ def build_parser():
     rv = sub.add_parser("review", help="focus thread and open reviewr")
     rv.add_argument("id")
     rv.add_argument("--verdict", choices=["approved", "rejected"])
+    rv.add_argument("--reviewer", action="store_true", help="start a reviewer sub-agent in a split pane")
+    rv.add_argument("--profile", default="reviewer")
+    rv.add_argument("--agent")
+    rv.add_argument("--reviewer-prompt")
     rv.set_defaults(func=cmd_review)
 
     c = sub.add_parser("checkpoint", help="commit current worktree changes")
@@ -781,6 +921,22 @@ def build_parser():
     sa.add_argument("--prompt")
     sa.add_argument("--focus", action="store_true")
     sa.set_defaults(func=cmd_subagent)
+
+    m = sub.add_parser("machines", help="list saved herdr SSH machines")
+    m.add_argument("--json", action="store_true")
+    m.set_defaults(func=cmd_machines)
+
+    rm = sub.add_parser("remote", help="pass a command to a saved herdr machine")
+    rm.add_argument("machine")
+    rm.add_argument("rest", nargs=argparse.REMAINDER,
+                    help="e.g. agent list | agent prompt NAME TEXT | agent read NAME")
+    rm.set_defaults(func=cmd_remote)
+
+    nt = sub.add_parser("notify", help="desktop notification")
+    nt.add_argument("title")
+    nt.add_argument("--body", default="")
+    nt.add_argument("--sound", default="none")
+    nt.set_defaults(func=cmd_notify)
 
     d = sub.add_parser("doctor", help="check prerequisites")
     d.set_defaults(func=cmd_doctor)
