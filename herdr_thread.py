@@ -2997,12 +2997,49 @@ def _display_width(text: str) -> int:
     return width
 
 
+def _run_curses(draw):
+    import curses
+
+    stdscr = curses.initscr()
+    try:
+        curses.noecho()
+        curses.cbreak()
+        stdscr.keypad(True)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        return draw(stdscr)
+    finally:
+        try:
+            stdscr.keypad(False)
+        except curses.error:
+            pass
+        try:
+            curses.nocbreak()
+        except curses.error:
+            pass
+        try:
+            curses.echo()
+        except curses.error:
+            pass
+        try:
+            curses.endwin()
+        except curses.error:
+            pass
+
+
 def _ui_task():
     import curses
 
     def draw(stdscr):
         curses.curs_set(1)
         _ui_colors()
+        try:
+            curses.set_escdelay(25)
+        except AttributeError:
+            pass
+        stdscr.keypad(True)
         text = ""
         focus = 0      # 0 = input, 1 = buttons
         button = 0     # 0 = OK, 1 = Cancel
@@ -3055,7 +3092,7 @@ def _ui_task():
                 ch = stdscr.get_wch()
             except curses.error:
                 continue
-            if ch == "\x1b":
+            if ch in ("\x1b", 27, curses.KEY_EXIT):
                 return None
             if ch == "\t":
                 focus = 1 - focus
@@ -3084,7 +3121,7 @@ def _ui_task():
             elif isinstance(ch, str) and ch.isprintable():
                 text += ch
 
-    return curses.wrapper(draw)
+    return _run_curses(draw)
 
 
 def _ui_done():
@@ -3099,6 +3136,11 @@ def _ui_done():
     def draw(stdscr):
         curses.curs_set(0)
         _ui_colors()
+        try:
+            curses.set_escdelay(25)
+        except AttributeError:
+            pass
+        stdscr.keypad(True)
         selected = 0
         while True:
             h, w = stdscr.getmaxyx()
@@ -3142,7 +3184,7 @@ def _ui_done():
                 ch = stdscr.get_wch()
             except curses.error:
                 continue
-            if ch == "\x1b":
+            if ch in ("\x1b", 27, curses.KEY_EXIT):
                 return None
             if ch in (curses.KEY_UP, "k"):
                 selected = (selected - 1) % len(options)
@@ -3155,7 +3197,7 @@ def _ui_done():
                     if ch == k:
                         return k
 
-    return curses.wrapper(draw)
+    return _run_curses(draw)
 
 
 def cmd_ui(args):
@@ -3163,10 +3205,7 @@ def cmd_ui(args):
         value = _ui_task() if args.kind == "task" else _ui_done()
     except Exception as e:
         print(f"herdr-thread ui failed: {e}", file=sys.stderr)
-        try:
-            value = input("Task: " if args.kind == "task" else "Done [p/r/c]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            value = None
+        value = None
     if args.result:
         path = Path(args.result)
         if value:
