@@ -2946,8 +2946,8 @@ KEYS_BLOCK = """
 [[keys.command]]
 key = "prefix+t"
 type = "popup"
-width = "72%"
-height = "32%"
+width = "56%"
+height = "38%"
 command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-task-$$; /home/felix/.local/bin/herdr-thread ui task --result \"$result\" 2>>/tmp/herdr-thread-ui.log; task=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
 description = "herdr-thread: new task"
 
@@ -2960,11 +2960,21 @@ description = "herdr-thread: review current"
 [[keys.command]]
 key = "prefix+alt+d"
 type = "popup"
-width = "72%"
-height = "45%"
+width = "56%"
+height = "46%"
 command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-done-$$; /home/felix/.local/bin/herdr-thread ui done --result \"$result\" 2>>/tmp/herdr-thread-ui.log; ans=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
 description = "herdr-thread: done current"
 """
+
+
+def _display_width(text: str) -> int:
+    import unicodedata
+    width = 0
+    for ch in text:
+        if unicodedata.combining(ch):
+            continue
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
 
 
 def _ui_task():
@@ -2984,9 +2994,10 @@ def _ui_task():
         while True:
             h, w = stdscr.getmaxyx()
             stdscr.erase()
-            bw = max(36, min(w - 8, 76))
+            bw = max(36, min(w - 8, 68))
             x = max(2, (w - bw) // 2)
-            y = max(2, (h - 7) // 2)
+            y = max(0, (h - 7) // 2)
+            footer = min(max(y + 7, 6), max(0, h - 2))
             try:
                 stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
                 stdscr.addnstr(y, x, "herdr-thread", bw)
@@ -2998,16 +3009,15 @@ def _ui_task():
                 stdscr.addnstr(y + 4, x, "\u203a ", 2)
                 field = text[-(bw - 3):]
                 stdscr.addnstr(y + 4, x + 2, field, bw - 2)
-                stdscr.move(y + 4, x + 2 + len(field))
                 stdscr.attrset(curses.A_DIM)
-                try:
-                    for i in range(min(bw, w - x - 1)):
-                        stdscr.addch(y + 5, x + i, curses.ACS_HLINE)
-                except curses.error:
-                    pass
-                stdscr.attrset(curses.color_pair(3))
-                stdscr.addnstr(y + 7, x, "Enter create  \u00b7  Esc cancel  \u00b7  Ctrl+C quit", bw)
+                for i in range(min(bw, w - x - 1)):
+                    stdscr.addch(y + 5, x + i, curses.ACS_HLINE)
+                stdscr.attrset(curses.A_REVERSE | curses.A_BOLD)
+                stdscr.addnstr(footer, x, " Enter  OK ", 10)
+                stdscr.attrset(curses.A_REVERSE)
+                stdscr.addnstr(footer, x + 12, " Esc  Cancel ", 13)
                 stdscr.attrset(curses.A_NORMAL)
+                stdscr.move(y + 4, x + 2 + _display_width(field))
                 stdscr.refresh()
             except curses.error:
                 pass
@@ -3050,9 +3060,10 @@ def _ui_done():
         while True:
             h, w = stdscr.getmaxyx()
             stdscr.erase()
-            bw = max(40, min(w - 8, 72))
+            bw = max(40, min(w - 8, 68))
             x = max(2, (w - bw) // 2)
-            y = max(2, (h - 10) // 2)
+            y = max(0, (h - 8) // 2)
+            footer = max(0, h - 2)
             try:
                 stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
                 stdscr.addnstr(y, x, "herdr-thread", bw)
@@ -3061,7 +3072,7 @@ def _ui_done():
                 stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
                 stdscr.addnstr(y + 2, x, "What next?", bw)
                 for i, (key, label, hint) in enumerate(options):
-                    row = y + 4 + i
+                    row = y + 3 + i
                     if i == selected:
                         stdscr.attrset(curses.A_REVERSE | curses.A_BOLD)
                         stdscr.addnstr(row, x, f"  {label}  ", bw)
@@ -3072,8 +3083,10 @@ def _ui_done():
                         stdscr.addnstr(row, x, f"  {label}  ", bw)
                         stdscr.attrset(curses.A_DIM)
                         stdscr.addnstr(row, x + len(label) + 4, hint, max(1, bw - len(label) - 5))
-                stdscr.attrset(curses.color_pair(3))
-                stdscr.addnstr(y + 9, x, "\u2191\u2193 move  \u00b7  Enter select  \u00b7  Esc cancel", bw)
+                stdscr.attrset(curses.A_REVERSE | curses.A_BOLD)
+                stdscr.addnstr(footer, x, " Enter  Select ", 14)
+                stdscr.attrset(curses.A_REVERSE)
+                stdscr.addnstr(footer, x + 16, " Esc  Cancel ", 13)
                 stdscr.attrset(curses.A_NORMAL)
                 stdscr.refresh()
             except curses.error:
