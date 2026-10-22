@@ -54,15 +54,12 @@
 | D3 | Agent 跑命令 | Agent 自身终端工具 | ✅ |
 | D4 | 共享线程里的终端 | herdr remote attach 同一 session | 🟡 |
 
-### E. Skills / MCP / 规则
+### E. 规则 / MCP / 项目设置
 
 | # | Delta 功能 | 替代 | 状态 |
 |---|---|---|---|
-| E1 | `.agents/skills/SKILL.md` | codex/claude/pi 都直接读；herdr 只负责起 Agent | ✅ |
-| E2 | Skills 管理/创建 | Agent 内 `/skill` 或直接编辑 `.agents/skills` | ✅ |
-| E3 | Land skill | 用 `~/.config/herdr-thread/land.sh` 替代 | 🟡 |
 | E4 | MCP 服务器 | 配在 Agent 自己的 config（codex/claude/pi） | ✅ |
-| E5 | `.agents/prepare` / setup | 由 Agent/技能执行；`herdr-thread new --setup` 后续接 | 🔵 |
+| E5 | `.agents/prepare` / setup | `new --run-hooks` 或 `setup <id>` | 🟡 |
 | E6 | 项目规则 | `.agents/` + Agent 自身规则文件 | ✅ |
 
 ### F. Provider / 模型
@@ -267,11 +264,11 @@ backup  prune  doctor
 - Thread 生命周期：`children/resume/rename/delete/restore-thread`、`mention/openfile`
 - 对话编辑：`turn --edit/--revert --reseed` 写 canonical context 并重新对齐 Agent
 - Review：`guide`、`share --review` HTML、`check-remote`
-- Land：依赖 `depend` + 拓扑排序、`local`/`skill` 策略、`--skip-deps`
+- Land：依赖 `depend` + 拓扑排序、`local` 策略、`--skip-deps`
 - Sync：`--rebase` 与 `--merge` 都先 fetch
 - 子 Agent：`follow` 聚焦/读取
 - 模型：`models`、`provider`（base URL/key/models）
-- Skills：list/show/new/path/invoke
+- ：list/show/new/path/invoke
 - Terminal：线程级 list/new/run/close
 - Runner：env/push-env/preview/urls/snapshot/destroy
 - Web/Inbox：`serve` 本地 dashboard、API `/api/threads`

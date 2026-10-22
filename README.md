@@ -126,14 +126,13 @@ thread
 | `check-remote` | 对比本地 branch 与 origin |
 | `subagent follow` | `follow <parent> <sub>` 聚焦并读子 Agent |
 | `models` / `provider` | 角色、profile、fallback、provider 管理 |
-| `skills` | list/show/new/path/invoke |
 | `terminal` | 线程级终端 list/new/run/close |
 | `serve` | 本地 Web dashboard / inbox |
 | `config` | 显示有效配置/路径 |
 | `delta` | Delta 风格别名：open/thread/worktree |
 | `restore-db` | 从 backup 恢复 threads.db |
 | `checkpoint` | 提交 / `--list` / `--restore`，每个 repo 单独记录 |
-| `land` | `push/pr/merge/merge-pr/local/skill/hook`；批量 `--all/--tag`；dirty/verdict/pre-land/deps gate |
+| `land` | `push/pr/merge/merge-pr/local/hook`；批量 `--all/--tag`；dirty/verdict/pre-land/deps gate |
 | `pr` | 查看 / `--watch` PR + CI |
 | `sync` | 刷新 agent 状态；`--rebase`（先 fetch）；`--pr` |
 | `watch` | 后台轮询；`--daemon/--status/--stop` |

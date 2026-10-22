@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
+import io
 import json
 import os
 import re
@@ -1007,6 +1009,21 @@ def cmd_capture(args):
 def cmd_comment(args):
     conn = db()
     r = thread_row(conn, args.id)
+    if getattr(args, "export_file", None):
+        rows = conn.execute("SELECT * FROM comments WHERE thread_id=? ORDER BY id", (r["id"],)).fetchall()
+        Path(args.export_file).write_text(json.dumps([dict(x) for x in rows], ensure_ascii=False, indent=2))
+        print(f"exported {len(rows)} comments -> {args.export_file}")
+        return
+    if getattr(args, "import_file", None):
+        data = json.loads(Path(args.import_file).read_text())
+        n = 0
+        for x in data if isinstance(data, list) else data.get("comments", []):
+            conn.execute("INSERT INTO comments(thread_id,file,line,body,created_at) VALUES(?,?,?,?,?)",
+                         (r["id"], x.get("file", ""), int(x.get("line", 0) or 0), x.get("body", ""), now()))
+            n += 1
+        conn.commit()
+        print(f"imported {n} comments from {args.import_file}")
+        return
     if args.list:
         rows = conn.execute(
             "SELECT * FROM comments WHERE thread_id=? ORDER BY id", (r["id"],)
@@ -1538,26 +1555,6 @@ def _land_one(cfg, conn, r, args) -> str:
                 raise RuntimeError(f"{Path(rr['repo']).name}: local push failed: {p.stderr.strip() or p.stdout.strip()}")
             messages.append(f"{Path(rr['repo']).name}: pushed {rr['branch']} -> {target}")
         conn.execute("UPDATE threads SET status='landed', landed_at=? WHERE id=?", (now(), r["id"]))
-    elif strategy == "skill":
-        candidates = [Path(r["worktree"]) / ".agents" / "land",
-                      Path(r["worktree"]) / ".herdr-thread" / "land.sh",
-                      HOME / ".config" / "herdr-thread" / "land-skill.sh"]
-        script = next((x for x in candidates if x.exists()), None)
-        if not script:
-            raise RuntimeError("no land skill found (.agents/land, .herdr-thread/land.sh, land-skill.sh)")
-        if not os.access(script, os.X_OK):
-            raise RuntimeError(f"land skill is not executable: {script}")
-        env = os.environ.copy()
-        env.update({
-            "THREAD_ID": r["id"], "THREAD_LABEL": r["label"],
-            "REPO": r["repo"], "WORKTREE": r["worktree"], "BRANCH": r["branch"],
-            "REPOS": json.dumps([dict(x) for x in repos], ensure_ascii=False),
-        })
-        p = subprocess.run([str(script)], cwd=r["worktree"], env=env)
-        if p.returncode != 0:
-            raise RuntimeError(f"land skill failed ({p.returncode})")
-        conn.execute("UPDATE threads SET status='landed', landed_at=? WHERE id=?", (now(), r["id"]))
-        messages.append(f"land skill completed: {script}")
     elif strategy == "hook":
         hook = HOME / ".config" / "herdr-thread" / "land.sh"
         if not hook.exists():
@@ -1648,27 +1645,36 @@ def cmd_land(args):
 
     ok, failed = 0, 0
     results = []
-    for r in rows:
-        if args.dry_run:
-            print(f"would land {r['id']}  {r['branch']}  via {strategy}")
-            results.append({"id": r["id"], "ok": None, "dry_run": True})
-            continue
-        try:
-            msg = _land_one(cfg, conn, r, args)
-            print(f"{r['id']}: {msg}")
-            results.append({"id": r["id"], "ok": True, "message": msg})
-            ok += 1
-        except Exception as e:
-            failed += 1
-            results.append({"id": r["id"], "ok": False, "error": str(e)})
-            print(f"{r['id']}: FAILED {e}", file=sys.stderr)
-            if not args.continue_on_error:
-                print(f"stopped after failure; {len(rows) - ok - failed} not attempted", file=sys.stderr)
-                break
+    log = ""
+    def run_loop():
+        nonlocal ok, failed
+        for r in rows:
+            if args.dry_run:
+                print(f"would land {r['id']}  {r['branch']}  via {strategy}")
+                results.append({"id": r["id"], "ok": None, "dry_run": True})
+                continue
+            try:
+                msg = _land_one(cfg, conn, r, args)
+                print(f"{r['id']}: {msg}")
+                results.append({"id": r["id"], "ok": True, "message": msg})
+                ok += 1
+            except Exception as e:
+                failed += 1
+                results.append({"id": r["id"], "ok": False, "error": str(e)})
+                print(f"{r['id']}: FAILED {e}", file=sys.stderr)
+                if not args.continue_on_error:
+                    print(f"stopped after failure; {len(rows) - ok - failed} not attempted", file=sys.stderr)
+                    break
     if args.json:
-        print(json.dumps({"ok": ok, "failed": failed, "results": results}, ensure_ascii=False, indent=2))
-    elif not args.dry_run:
-        print(f"land summary: ok={ok} failed={failed}")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            run_loop()
+        log = buf.getvalue()
+        print(json.dumps({"ok": ok, "failed": failed, "results": results, "log": log}, ensure_ascii=False, indent=2))
+    else:
+        run_loop()
+        if not args.dry_run:
+            print(f"land summary: ok={ok} failed={failed}")
     if failed:
         raise SystemExit(1)
 
@@ -2296,6 +2302,42 @@ def cmd_follow(args):
         print(p.stdout.strip()[-args.chars:])
 
 
+def cmd_mcp(args):
+    agent = args.agent or "codex"
+    if agent == "claude":
+        cmd = ["claude", "mcp", *args.rest]
+    elif agent == "codex":
+        cmd = ["codex", "mcp", *args.rest]
+    else:
+        die(f"unsupported mcp agent: {agent}")
+    if not shutil.which(cmd[0]):
+        die(f"{cmd[0]} not found")
+    p = subprocess.run(cmd, text=True)
+    raise SystemExit(p.returncode)
+
+
+def cmd_usage(args):
+    conn = db()
+    threads = conn.execute("SELECT status,COUNT(*) n FROM threads GROUP BY status").fetchall()
+    turns = conn.execute("SELECT COUNT(*) n FROM turns").fetchone()["n"]
+    comments = conn.execute("SELECT COUNT(*) n FROM comments").fetchone()["n"]
+    checkpoints = conn.execute("SELECT COUNT(*) n FROM checkpoints").fetchone()["n"]
+    prs = conn.execute("SELECT COUNT(*) n FROM thread_repos WHERE pr_url IS NOT NULL").fetchone()["n"]
+    data = {
+        "threads": {x["status"]: x["n"] for x in threads},
+        "turns": turns,
+        "comments": comments,
+        "checkpoints": checkpoints,
+        "prs": prs,
+        "db_bytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+    }
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    else:
+        print(f"threads: {data['threads']}")
+        print(f"turns={turns} comments={comments} checkpoints={checkpoints} prs={prs} db={data['db_bytes']} bytes")
+
+
 def cmd_models(args):
     cfg = load_config()
     print("roles:")
@@ -2338,67 +2380,6 @@ def cmd_provider(args):
     )
     conn.commit()
     print(f"saved provider {args.name}")
-
-
-def cmd_skills(args):
-    conn = db()
-    roots = []
-    if args.repo:
-        roots.append(Path(args.repo).resolve() / ".agents" / "skills")
-    else:
-        for r in conn.execute("SELECT DISTINCT repo FROM threads").fetchall():
-            roots.append(Path(r["repo"]) / ".agents" / "skills")
-    roots += [HOME / ".pi" / "agent" / "skills", HOME / ".config" / "herdr-thread" / "skills"]
-    if args.action == "list":
-        seen = set()
-        for root in roots:
-            if not root.is_dir():
-                continue
-            for d in sorted(root.iterdir()):
-                if d.is_dir() and d.name not in seen:
-                    seen.add(d.name)
-                    print(f"{d.name:28} {d}")
-        if not seen:
-            print("no skills")
-        return
-    if args.action == "path":
-        for root in roots:
-            print(root)
-        return
-    if args.action == "invoke":
-        if not args.thread or not args.name:
-            die("skills invoke <thread> <skill>")
-        r = thread_row(conn, args.thread)
-        target = r["agent_name"] or r["pane_id"]
-        if not target:
-            die("thread has no agent")
-        msg = f"Use the skill `{args.name}`. " + (args.text or "Follow its instructions for the current task.")
-        herdr("agent", "prompt", target, msg)
-        record_turn(conn, r["id"], "user", msg)
-        print(f"invoked {args.name} in {r['id']}")
-        return
-    if not args.name:
-        die("skills show/new requires a name")
-    found = None
-    for root in roots:
-        if (root / args.name / "SKILL.md").exists():
-            found = root / args.name
-            break
-    if args.action == "show":
-        if not found:
-            die(f"skill not found: {args.name}")
-        print((found / "SKILL.md").read_text())
-        return
-    if args.action == "new":
-        repo = Path(args.repo).resolve() if args.repo else None
-        if not repo:
-            die("skills new requires --repo")
-        dst = repo / ".agents" / "skills" / args.name
-        dst.mkdir(parents=True, exist_ok=True)
-        (dst / "SKILL.md").write_text(
-            f"---\nname: {args.name}\ndescription: TODO\n---\n\n# {args.name}\n\nTODO\n")
-        print(dst / "SKILL.md")
-        return
 
 
 def cmd_terminal(args):
@@ -2749,7 +2730,26 @@ def cmd_config(args):
     if args.action == "show":
         print(json.dumps(cfg, ensure_ascii=False, indent=2))
         return
-    die("config action: show|path")
+    if args.action == "set":
+        if not args.key or args.value is None:
+            die("config set <key> <value>")
+        text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else ""
+        val = args.value
+        if val.lower() in ("true", "false"):
+            line = f"{args.key} = {val.lower()}"
+        elif re.fullmatch(r"-?\d+", val):
+            line = f"{args.key} = {val}"
+        elif val.startswith(("[", "{")):
+            line = f"{args.key} = {val}"
+        else:
+            line = f"{args.key} = " + json.dumps(val)
+        pat = re.compile(rf"^{re.escape(args.key)}\s*=.*$", re.M)
+        text = pat.sub(line, text) if pat.search(text) else text.rstrip() + "\n" + line + "\n"
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(text)
+        print(f"{CONFIG_PATH}: {line}")
+        return
+    die("config action: show|path|set")
 
 
 def cmd_delta(args):
@@ -2778,8 +2778,19 @@ def cmd_delta(args):
     if args.action == "worktree":
         p = subprocess.run(["herdr", "worktree", *rest], text=True)
         raise SystemExit(p.returncode)
-    if args.action in ("auth", "mcp", "integration"):
-        print(f"delta {args.action}: managed by the agent/provider config, not herdr-thread")
+    if args.action == "auth":
+        for cmd in (["gh", "auth", "status"], ["codex", "login", "status"]):
+            if shutil.which(cmd[0]):
+                p = subprocess.run(cmd, text=True, capture_output=True)
+                print(f"$ {' '.join(cmd)}")
+                print((p.stdout or p.stderr).strip()[:2000])
+        return
+    if args.action == "mcp":
+        cmd_mcp(argparse.Namespace(agent="codex", rest=rest or ["list"]))
+        return
+    if args.action == "integration":
+        print(f"bash completion: {Path(__file__).resolve().parent / 'completions' / 'herdr-thread.bash'}")
+        print("install: cp completions/herdr-thread.bash /etc/bash_completion.d/  (or source it)")
         return
     die(f"unknown delta command: {args.action}")
 
@@ -2881,7 +2892,42 @@ def cmd_serve(args):
                 for x in comments:
                     body.append(f"<p>[{x['id']}] {html.escape(x['status'])} {html.escape(x['file'])}:{x['line']} "
                                 f"{html.escape(x['body'])}</p>")
+                body.append(
+                    f"<h3>Add comment</h3><form method='post' action='/thread/{r['id']}/comment'>"
+                    "file <input name='file' size='20'> line <input name='line' size='5'><br>"
+                    "<textarea name='body' rows='3' cols='80'></textarea><br><button>add comment</button></form>"
+                    f"<h3>Add note</h3><form method='post' action='/thread/{r['id']}/note'>"
+                    "<textarea name='body' rows='3' cols='80'></textarea><br><button>add note</button></form>")
                 self._send(page(r["label"], "".join(body)))
+                return
+            self._send(page("not found", "<h1>not found</h1>"), 404)
+
+        def do_POST(self):
+            from urllib.parse import parse_qs
+            path = urlparse(self.path).path
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length).decode("utf-8", "replace")
+            form = parse_qs(raw)
+            if path.startswith("/thread/") and (path.endswith("/comment") or path.endswith("/note")):
+                parts = path.strip("/").split("/")
+                tid = parts[1]
+                conn = db()
+                try:
+                    r = thread_row(conn, tid)
+                except SystemExit:
+                    self._send(page("not found", "<h1>not found</h1>"), 404)
+                    return
+                body = (form.get("body") or [""])[0].strip()
+                if body:
+                    if path.endswith("/comment"):
+                        conn.execute("INSERT INTO comments(thread_id,file,line,body,created_at) VALUES(?,?,?,?,?)",
+                                     (r["id"], (form.get("file") or [""])[0], int((form.get("line") or ["0"])[0] or 0), body, now()))
+                    else:
+                        record_turn(conn, r["id"], "note", body)
+                    conn.commit()
+                self.send_response(303)
+                self.send_header("Location", f"/thread/{r['id']}")
+                self.end_headers()
                 return
             self._send(page("not found", "<h1>not found</h1>"), 404)
 
@@ -3017,6 +3063,8 @@ def build_parser():
     cm.add_argument("--to", help="send comments to another thread")
     cm.add_argument("--resolve", type=int)
     cm.add_argument("--json", action="store_true")
+    cm.add_argument("--import", dest="import_file")
+    cm.add_argument("--export", dest="export_file")
     cm.set_defaults(func=cmd_comment)
 
     at = sub.add_parser("attach", help="attach a file to a thread worktree")
@@ -3057,7 +3105,7 @@ def build_parser():
     ld.add_argument("id", nargs="*")
     ld.add_argument("--all", action="store_true")
     ld.add_argument("--tag")
-    ld.add_argument("--strategy", choices=["push", "pr", "merge", "merge-pr", "local", "skill", "hook"])
+    ld.add_argument("--strategy", choices=["push", "pr", "merge", "merge-pr", "local", "hook"])
     ld.add_argument("--target")
     ld.add_argument("--skip-deps", action="store_true")
     ld.add_argument("--into")
@@ -3219,6 +3267,15 @@ def build_parser():
     fl.add_argument("--chars", type=int, default=4000)
     fl.set_defaults(func=cmd_follow)
 
+    mc = sub.add_parser("mcp", help="MCP server management via codex/claude")
+    mc.add_argument("--agent", default="codex", choices=["codex", "claude"])
+    mc.add_argument("rest", nargs=argparse.REMAINDER)
+    mc.set_defaults(func=cmd_mcp)
+
+    us = sub.add_parser("usage", help="local usage stats")
+    us.add_argument("--json", action="store_true")
+    us.set_defaults(func=cmd_usage)
+
     md = sub.add_parser("models", help="list roles/profiles/providers")
     md.set_defaults(func=cmd_models)
 
@@ -3229,14 +3286,6 @@ def build_parser():
     pv.add_argument("--api-key")
     pv.add_argument("--models")
     pv.set_defaults(func=cmd_provider)
-
-    sk = sub.add_parser("skills", help="list/show/create/invoke repo skills")
-    sk.add_argument("action", choices=["list", "show", "new", "path", "invoke"])
-    sk.add_argument("name", nargs="?")
-    sk.add_argument("--repo")
-    sk.add_argument("--thread")
-    sk.add_argument("--text")
-    sk.set_defaults(func=cmd_skills)
 
     tm = sub.add_parser("terminal", help="thread-scoped terminals")
     tm.add_argument("action", choices=["list", "new", "run", "close"])
@@ -3293,7 +3342,9 @@ def build_parser():
     pn.set_defaults(func=cmd_prune)
 
     cf = sub.add_parser("config", help="show effective config / paths")
-    cf.add_argument("action", choices=["show", "path"])
+    cf.add_argument("action", choices=["show", "path", "set"])
+    cf.add_argument("key", nargs="?")
+    cf.add_argument("value", nargs="?")
     cf.set_defaults(func=cmd_config)
 
     dl = sub.add_parser("delta", help="Delta-compatible command aliases")
