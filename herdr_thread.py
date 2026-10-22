@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -85,6 +86,10 @@ def load_config() -> dict:
 def db() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    try:
+        os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
     conn.row_factory = sqlite3.Row
     conn.execute(
         """
@@ -217,6 +222,49 @@ def db() -> sqlite3.Connection:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS thread_deps (
+            thread_id TEXT NOT NULL,
+            depends_on TEXT NOT NULL,
+            PRIMARY KEY(thread_id, depends_on)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS review_guides (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS terminals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            pane_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS providers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            base_url TEXT NOT NULL DEFAULT '',
+            api_key TEXT NOT NULL DEFAULT '',
+            models TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS checkpoints (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id TEXT NOT NULL,
@@ -245,6 +293,7 @@ def db() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute("PRAGMA user_version = 3")
     conn.commit()
     return conn
 
@@ -519,29 +568,39 @@ def cmd_new(args):
         if start_res:
             agent_name = start_res
 
-    conn.execute(
-        """INSERT INTO threads
-           (id,parent_id,label,repo,worktree,branch,base_ref,base_sha,workspace_id,pane_id,review_pane_id,
-            agent_name,agent_kind,status,review_state,tags,bookmarked,archived,created_at,head_sha,meta)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            tid, args.parent, args.label, repo, wt, worktree.get("branch", branch), base_ref, base_sha,
-            workspace_id, pane_id, review_pane, agent_name, agent_kind,
-            "working" if agent_name else "created", "", args.tag or "", 0, 0,
-            now(), git(wt, "rev-parse", "--short", "HEAD", check=False), "{}",
-        ),
-    )
-    conn.execute(
-        "INSERT INTO thread_repos(thread_id,repo,worktree,branch,base_ref,base_sha,primary_repo) "
-        "VALUES(?,?,?,?,?,?,1)",
-        (tid, repo, wt, worktree.get("branch", branch), base_ref, base_sha),
-    )
-    for x in extra_repos:
+    try:
+        conn.execute(
+            """INSERT INTO threads
+               (id,parent_id,label,repo,worktree,branch,base_ref,base_sha,workspace_id,pane_id,review_pane_id,
+                agent_name,agent_kind,status,review_state,tags,bookmarked,archived,created_at,head_sha,meta)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                tid, args.parent, args.label, repo, wt, worktree.get("branch", branch), base_ref, base_sha,
+                workspace_id, pane_id, review_pane, agent_name, agent_kind,
+                "working" if agent_name else "created", "", args.tag or "", 0, 0,
+                now(), git(wt, "rev-parse", "--short", "HEAD", check=False), "{}",
+            ),
+        )
         conn.execute(
             "INSERT INTO thread_repos(thread_id,repo,worktree,branch,base_ref,base_sha,primary_repo) "
-            "VALUES(?,?,?,?,?,?,0)",
-            (tid, x["repo"], x["worktree"], x["branch"], x["base_ref"], x["base_sha"]),
+            "VALUES(?,?,?,?,?,?,1)",
+            (tid, repo, wt, worktree.get("branch", branch), base_ref, base_sha),
         )
+        for x in extra_repos:
+            conn.execute(
+                "INSERT INTO thread_repos(thread_id,repo,worktree,branch,base_ref,base_sha,primary_repo) "
+                "VALUES(?,?,?,?,?,?,0)",
+                (tid, x["repo"], x["worktree"], x["branch"], x["base_ref"], x["base_sha"]),
+            )
+    except Exception as e:
+        conn.rollback()
+        for x in extra_repos:
+            run(["git", "-C", x["repo"], "worktree", "remove", "--force", x["worktree"]], check=False)
+        try:
+            herdr("worktree", "remove", "--workspace", workspace_id, "--force")
+        except Exception:
+            pass
+        raise RuntimeError(f"failed to persist thread after creating workspace: {e}")
     conn.commit()
     event(conn, tid, "created", f"workspace={workspace_id} branch={branch}")
 
@@ -692,7 +751,7 @@ def ci_state(rollup) -> str:
     fail_states = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
     failed = pending = False
     for c in rollup:
-        if c.get("__typename") == "CheckRun" or "conclusion" in c:
+        if c.get("__typename") == "CheckRun" or "conclusion" in c or "status" in c:
             status = (c.get("status") or "").upper()
             concl = (c.get("conclusion") or "").upper()
             if concl in fail_states:
@@ -870,7 +929,9 @@ def cmd_turn(args):
         conn.execute("UPDATE turns SET content=? WHERE id=? AND thread_id=?", (args.text, args.edit, r["id"]))
         conn.commit()
         event(conn, r["id"], "turn-edit", str(args.edit))
-        print(f"turn {args.edit} edited (metadata only; agent context unchanged)")
+        print(f"turn {args.edit} edited")
+        if args.reseed:
+            reseed_context(conn, r, f"turn {args.edit} edited")
         return
     if args.revert is not None:
         row = conn.execute("SELECT seq FROM turns WHERE id=? AND thread_id=?", (args.revert, r["id"])).fetchone()
@@ -879,7 +940,9 @@ def cmd_turn(args):
         conn.execute("UPDATE turns SET active=0 WHERE thread_id=? AND seq>=?", (r["id"], row["seq"]))
         conn.commit()
         event(conn, r["id"], "turn-revert", f"from {args.revert}")
-        print(f"turns from {args.revert} marked inactive (metadata only; use checkpoint --restore for files)")
+        print(f"turns from {args.revert} marked inactive")
+        if args.reseed:
+            reseed_context(conn, r, f"conversation reverted at turn {args.revert}")
         return
     die("nothing to do; use --add/--list/--bookmark/--edit/--revert")
 
@@ -983,8 +1046,18 @@ def cmd_attach(args):
         if not rows:
             print("no attachments")
         return
+    if getattr(args, "text", None):
+        dst_dir = Path(r["worktree"]) / ".herdr-thread" / "attachments"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / f"note-{int(time.time())}.md"
+        dst.write_text(args.text)
+        conn.execute("INSERT INTO attachments(thread_id,source,stored,created_at) VALUES(?,?,?,?)",
+                     (r["id"], "text", str(dst), now()))
+        conn.commit()
+        print(f"attached text -> {dst}")
+        return
     if not args.file:
-        die("attach requires a file")
+        die("attach requires a file or --text")
     src = Path(args.file).expanduser().resolve()
     if not src.exists():
         die(f"file not found: {src}")
@@ -1107,6 +1180,85 @@ def cmd_review(args):
                       "--body", r["branch"], "--sound", "done" if args.verdict == "approved" else "request")
             except Exception:
                 pass
+
+
+def cmd_guide(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    repos = repo_rows(conn, r)
+    lines = [f"# Review guide: {r['label']}", "", f"- thread: {r['id']}", f"- status: {r['status']}",
+             f"- review: {r['review_state'] or '-'}", ""]
+    for rr in repos:
+        name = Path(rr["repo"]).name
+        base = rr["base_sha"] or rr["base_ref"] or "HEAD"
+        lines += [f"## {name}", "", f"branch: `{rr['branch']}`  base: `{base[:7]}`", ""]
+        log = git(rr["worktree"], "log", "--oneline", f"{base}..HEAD", check=False)
+        lines += ["### Commits", "", log or "(none)", ""]
+        stat = git(rr["worktree"], "diff", "--stat", f"{base}..HEAD", check=False)
+        lines += ["### Files", "", stat or "(none)", ""]
+        dirty = git(rr["worktree"], "status", "--porcelain", check=False)
+        if dirty.strip():
+            lines += ["### Uncommitted", "", "```", dirty, "```", ""]
+    if r["reviewer_agent"]:
+        p = run(["herdr", "agent", "read", r["reviewer_agent"], "--source", "recent",
+                 "--lines", "200", "--format", "text"], check=False)
+        if p.returncode == 0 and p.stdout.strip():
+            lines += ["## Reviewer notes", "", p.stdout.strip(), ""]
+    content = "\n".join(lines)
+    path = Path(r["worktree"]) / ".herdr-thread" / "review-guide.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    conn.execute("INSERT INTO review_guides(thread_id,path,created_at) VALUES(?,?,?)",
+                 (r["id"], str(path), now()))
+    conn.commit()
+    event(conn, r["id"], "guide", str(path))
+    if args.print:
+        print(content)
+    else:
+        print(path)
+
+
+def cmd_depend(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    if args.list:
+        rows = conn.execute(
+            "SELECT d.depends_on, t.label, t.status FROM thread_deps d "
+            "LEFT JOIN threads t ON t.id=d.depends_on WHERE d.thread_id=? ORDER BY d.depends_on",
+            (r["id"],),
+        ).fetchall()
+        for x in rows:
+            print(f"{x['depends_on']}  {x['label'] or '?'}  [{x['status'] or '?'}]")
+        if not rows:
+            print("no dependencies")
+        return
+    if not args.on:
+        die("--on is required (or --list)")
+    if args.remove:
+        conn.execute("DELETE FROM thread_deps WHERE thread_id=? AND depends_on=?", (r["id"], args.on))
+        conn.commit()
+        print(f"removed dependency {r['id']} -> {args.on}")
+        return
+    if not conn.execute("SELECT 1 FROM threads WHERE id=?", (args.on,)).fetchone():
+        die(f"dependency thread not found: {args.on}")
+    conn.execute("INSERT OR IGNORE INTO thread_deps(thread_id,depends_on) VALUES(?,?)", (r["id"], args.on))
+    conn.commit()
+    print(f"added dependency {r['id']} -> {args.on}")
+
+
+def cmd_check_remote(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    for rr in repo_rows(conn, r):
+        name = Path(rr["repo"]).name
+        run(["git", "-C", rr["worktree"], "fetch", "--all", "--prune"], check=False)
+        remote = git(rr["worktree"], "rev-parse", "--verify", f"origin/{rr['branch']}", check=False)
+        head = git(rr["worktree"], "rev-parse", "HEAD", check=False)
+        if not remote:
+            print(f"{name}: no origin/{rr['branch']}")
+            continue
+        counts = git(rr["worktree"], "rev-list", "--left-right", "--count", f"origin/{rr['branch']}...HEAD", check=False)
+        print(f"{name}: head={head[:7]} remote={remote[:7]} {counts} (behind ahead)")
 
 
 def cmd_checkpoint(args):
@@ -1256,6 +1408,13 @@ def _land_one(cfg, conn, r, args) -> str:
         raise RuntimeError("review is rejected; pass --force to override")
     if cfg.get("require_approval") and r["review_state"] != "approved" and not args.force:
         raise RuntimeError(f"review_state is {r['review_state'] or 'empty'}; approval required (or --force)")
+    if not getattr(args, "skip_deps", False):
+        for d in conn.execute("SELECT depends_on FROM thread_deps WHERE thread_id=?", (r["id"],)).fetchall():
+            dep = conn.execute("SELECT * FROM threads WHERE id=?", (d["depends_on"],)).fetchone()
+            if not dep:
+                raise RuntimeError(f"missing dependency {d['depends_on']}")
+            if dep["status"] != "landed":
+                raise RuntimeError(f"dependency {dep['id']} ({dep['label']}) is {dep['status']}, not landed (use --skip-deps)")
     if not args.skip_checks:
         run_pre_land(cfg, r)
 
@@ -1343,6 +1502,40 @@ def _land_one(cfg, conn, r, args) -> str:
         else:
             conn.execute("UPDATE threads SET status='landed', pr_state='MERGED', landed_at=? WHERE id=?",
                          (now(), r["id"]))
+    elif strategy == "local":
+        if not args.target:
+            raise RuntimeError("--strategy local requires --target <path-or-remote>")
+        for rr in repos:
+            target = args.target
+            if len(repos) > 1:
+                if "{repo}" not in target:
+                    raise RuntimeError("multi-repo local push needs {repo} in --target")
+                target = target.replace("{repo}", Path(rr["repo"]).name)
+            p = run(["git", "-C", rr["worktree"], "push", target, rr["branch"]], check=False)
+            if p.returncode != 0:
+                raise RuntimeError(f"{Path(rr['repo']).name}: local push failed: {p.stderr.strip() or p.stdout.strip()}")
+            messages.append(f"{Path(rr['repo']).name}: pushed {rr['branch']} -> {target}")
+        conn.execute("UPDATE threads SET status='landed', landed_at=? WHERE id=?", (now(), r["id"]))
+    elif strategy == "skill":
+        candidates = [Path(r["worktree"]) / ".agents" / "land",
+                      Path(r["worktree"]) / ".herdr-thread" / "land.sh",
+                      HOME / ".config" / "herdr-thread" / "land-skill.sh"]
+        script = next((x for x in candidates if x.exists()), None)
+        if not script:
+            raise RuntimeError("no land skill found (.agents/land, .herdr-thread/land.sh, land-skill.sh)")
+        if not os.access(script, os.X_OK):
+            raise RuntimeError(f"land skill is not executable: {script}")
+        env = os.environ.copy()
+        env.update({
+            "THREAD_ID": r["id"], "THREAD_LABEL": r["label"],
+            "REPO": r["repo"], "WORKTREE": r["worktree"], "BRANCH": r["branch"],
+            "REPOS": json.dumps([dict(x) for x in repos], ensure_ascii=False),
+        })
+        p = subprocess.run([str(script)], cwd=r["worktree"], env=env)
+        if p.returncode != 0:
+            raise RuntimeError(f"land skill failed ({p.returncode})")
+        conn.execute("UPDATE threads SET status='landed', landed_at=? WHERE id=?", (now(), r["id"]))
+        messages.append(f"land skill completed: {script}")
     elif strategy == "hook":
         hook = HOME / ".config" / "herdr-thread" / "land.sh"
         if not hook.exists():
@@ -1376,6 +1569,26 @@ def _land_one(cfg, conn, r, args) -> str:
     return msg
 
 
+def _order_by_deps(conn, rows):
+    by_id = {r["id"]: r for r in rows}
+    done, out, visiting = set(), [], set()
+    def visit(tid):
+        if tid in done:
+            return
+        if tid in visiting:
+            raise RuntimeError(f"dependency cycle at {tid}")
+        visiting.add(tid)
+        for d in conn.execute("SELECT depends_on FROM thread_deps WHERE thread_id=?", (tid,)).fetchall():
+            if d["depends_on"] in by_id:
+                visit(d["depends_on"])
+        visiting.discard(tid)
+        done.add(tid)
+        out.append(by_id[tid])
+    for r in rows:
+        visit(r["id"])
+    return out
+
+
 def _land_rows(conn, args):
     if getattr(args, "id", None):
         return [thread_row(conn, x) for x in args.id]
@@ -1390,6 +1603,8 @@ def _land_rows(conn, args):
         "SELECT * FROM threads WHERE " + " AND ".join(conds) + " ORDER BY created_at",
         params,
     ).fetchall()
+    if getattr(args, "all", False):
+        rows = _order_by_deps(conn, rows)
     return rows
 
 
@@ -1504,6 +1719,156 @@ def cmd_open(args):
     print(f"focused {r['workspace_id']}  ({r['label']})")
 
 
+def cmd_children(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    if args.json:
+        rows = conn.execute(
+            "WITH RECURSIVE tree(id,depth) AS (SELECT id,0 FROM threads WHERE id=? "
+            "UNION ALL SELECT t.id,tree.depth+1 FROM threads t JOIN tree ON t.parent_id=tree.id) "
+            "SELECT th.*, tree.depth FROM tree JOIN threads th ON th.id=tree.id ORDER BY tree.depth, th.created_at",
+            (r["id"],),
+        ).fetchall()
+        print(json.dumps([dict(x) for x in rows], ensure_ascii=False, indent=2))
+        return
+    def walk(tid, depth):
+        rows = conn.execute("SELECT * FROM threads WHERE parent_id=? ORDER BY created_at", (tid,)).fetchall()
+        for x in rows:
+            print("  " * depth + f"{x['id']}  {x['label']}  [{x['status']}]")
+            walk(x["id"], depth + 1)
+    print(f"{r['id']}  {r['label']}  [{r['status']}]")
+    walk(r["id"], 1)
+
+
+def cmd_resume(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    repos = repo_rows(conn, r)
+    missing = [x for x in repos if not Path(x["worktree"]).exists()]
+    if missing:
+        die("worktree missing: " + ", ".join(x["worktree"] for x in missing))
+    if r["archived"]:
+        conn.execute("UPDATE threads SET archived=0 WHERE id=?", (r["id"],))
+        conn.commit()
+    workspaces = herdr("workspace", "list").get("workspaces", [])
+    ws = None
+    for w in workspaces:
+        path = (w.get("worktree") or {}).get("checkout_path")
+        if path and Path(path).resolve() == Path(r["worktree"]).resolve():
+            ws = w
+            break
+    if ws is None:
+        res = herdr("workspace", "create", "--cwd", r["worktree"], "--label", r["label"], "--no-focus")
+        ws = res.get("workspace", {})
+        root = res.get("root_pane", {})
+        ws_id = ws.get("workspace_id") or root.get("workspace_id")
+        pane_id = root.get("pane_id")
+    else:
+        ws_id = ws.get("workspace_id")
+        panes = pane_list(ws_id)
+        pane_id = r["pane_id"] if any(p.get("pane_id") == r["pane_id"] for p in panes) else (panes[0]["pane_id"] if panes else None)
+    agents = agent_states()
+    agent_name = r["agent_name"]
+    if pane_id and pane_id not in agents and r["agent_kind"]:
+        agent_name = agent_name or f"ht-{r['id']}"
+        start_agent(agent_name, r["agent_kind"], pane_id, ws_id, r["worktree"], fallbacks=[])
+    conn.execute("UPDATE threads SET workspace_id=?, pane_id=?, agent_name=?, status=CASE WHEN status='orphaned' THEN 'created' ELSE status END WHERE id=?",
+                 (ws_id, pane_id, agent_name, r["id"]))
+    conn.commit()
+    herdr("workspace", "focus", ws_id)
+    event(conn, r["id"], "resume", ws_id)
+    print(f"resumed {r['id']}  workspace={ws_id}  pane={pane_id}  agent={agent_name or '-'}")
+
+
+def cmd_rename(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    conn.execute("UPDATE threads SET label=? WHERE id=?", (args.label, r["id"]))
+    conn.commit()
+    event(conn, r["id"], "rename", f"{r['label']} -> {args.label}")
+    print(f"renamed {r['id']}: {r['label']} -> {args.label}")
+
+
+def cmd_delete(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    if not args.keep_worktree:
+        cleanup_thread(conn, r, force=True)
+    else:
+        conn.execute("UPDATE threads SET archived=1 WHERE id=?", (r["id"],))
+        conn.commit()
+    if args.purge:
+        for table in ("turns", "comments", "attachments", "checkpoints", "thread_repos",
+                      "thread_deps", "review_guides", "terminals", "subagents"):
+            if table == "subagents":
+                conn.execute("DELETE FROM subagents WHERE parent_id=? OR child_thread_id=?", (r["id"], r["id"]))
+            else:
+                col = "thread_id"
+                conn.execute(f"DELETE FROM {table} WHERE {col}=?", (r["id"],))
+        conn.execute("DELETE FROM threads WHERE id=?", (r["id"],))
+        conn.commit()
+        print(f"deleted {r['id']} (purged)")
+    else:
+        print(f"deleted {r['id']} (archived)")
+
+
+def cmd_restore_thread(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    conn.execute("UPDATE threads SET archived=0 WHERE id=?", (r["id"],))
+    conn.commit()
+    print(f"restored {r['id']}  {r['label']}")
+
+
+def cmd_mention(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    src = Path(args.file).expanduser().resolve()
+    if not src.exists():
+        die(f"file not found: {src}")
+    dst_dir = Path(r["worktree"]) / ".herdr-thread" / "attachments"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / src.name
+    if dst.exists():
+        dst = dst_dir / f"{src.stem}-{int(time.time())}{src.suffix}"
+    shutil.copy2(src, dst)
+    conn.execute("INSERT INTO attachments(thread_id,source,stored,created_at) VALUES(?,?,?,?)",
+                 (r["id"], str(src), str(dst), now()))
+    conn.commit()
+    text = args.text or f"Use the attached file: {dst}"
+    target = r["agent_name"] or r["pane_id"]
+    if target:
+        try:
+            herdr("agent", "prompt", target, text)
+            record_turn(conn, r["id"], "user", text)
+            print(f"prompted {target}")
+        except Exception as e:
+            print(f"warning: no agent to prompt ({e})", file=sys.stderr)
+    print(f"attached {src} -> {dst}")
+
+
+def reseed_context(conn, r, reason):
+    rows = conn.execute(
+        "SELECT * FROM turns WHERE thread_id=? AND active=1 ORDER BY seq", (r["id"],)
+    ).fetchall()
+    text = "\n\n".join(f"[{x['role']}] {x['content']}" for x in rows)
+    path = Path(r["worktree"]) / ".herdr-thread" / "context.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# Canonical context for {r['id']}\n\nReason: {reason}\n\n{text}\n")
+    target = r["agent_name"] or r["pane_id"]
+    if target:
+        msg = (f"Conversation metadata was changed ({reason}). Treat {path} as the canonical "
+               "conversation context and ignore earlier turns that are no longer in it. Continue from here.")
+        try:
+            herdr("agent", "prompt", target, msg)
+            record_turn(conn, r["id"], "system", f"reseed: {reason} -> {path}")
+        except Exception as e:
+            print(f"warning: no agent to reseed ({e})", file=sys.stderr)
+    event(conn, r["id"], "reseed", reason)
+    print(f"reseeded {r['id']} -> {path}")
+    return path
+
+
 def cmd_tag(args):
     conn = db()
     r = thread_row(conn, args.id)
@@ -1547,6 +1912,11 @@ def cmd_sync(args):
             if p.returncode != 0:
                 run(["git", "-C", r["worktree"], "rebase", "--abort"], check=False)
                 print(f"{r['id']}: rebase failed (aborted): {p.stderr.strip()[:200]}", file=sys.stderr)
+        elif getattr(args, "merge_upstream", False) and Path(r["worktree"]).exists():
+            run(["git", "-C", r["worktree"], "fetch", "--all", "--prune"], check=False)
+            p = run(["git", "-C", r["worktree"], "merge", "--no-edit", "@{u}"], check=False)
+            if p.returncode != 0:
+                print(f"{r['id']}: upstream merge failed: {p.stderr.strip()[:200]}", file=sys.stderr)
         if new_status != r["status"]:
             conn.execute("UPDATE threads SET status=? WHERE id=?", (new_status, r["id"]))
             event(conn, r["id"], "status", f"{r['status']} -> {new_status}")
@@ -1867,6 +2237,202 @@ def cmd_join(args):
         print(f"sent result to {target_parent}")
 
 
+def cmd_openfile(args):
+    conn = db()
+    r = thread_row(conn, args.id)
+    path = Path(args.file)
+    if not path.is_absolute():
+        path = Path(r["worktree"]) / path
+    if not path.exists():
+        die(f"file not found: {path}")
+    print(path)
+    if args.line:
+        print(f"{path}:{args.line}")
+
+
+def cmd_follow(args):
+    conn = db()
+    parent = thread_row(conn, args.parent)
+    row = conn.execute(
+        "SELECT * FROM subagents WHERE parent_id=? AND (CAST(id AS TEXT)=? OR child_thread_id LIKE ? OR agent_name LIKE ?) "
+        "ORDER BY id DESC LIMIT 1",
+        (parent["id"], args.sub, args.sub + "%", args.sub + "%"),
+    ).fetchone()
+    if not row:
+        die(f"subagent not found: {args.sub}")
+    target = row["agent_name"]
+    if row["child_thread_id"]:
+        target = thread_row(conn, row["child_thread_id"])["agent_name"]
+    if not target:
+        die("subagent has no agent")
+    p = run(["herdr", "agent", "focus", target], check=False)
+    if p.returncode != 0:
+        print(f"warning: focus failed: {p.stderr.strip()[:200]}", file=sys.stderr)
+    p = run(["herdr", "agent", "read", target, "--source", "recent", "--lines", str(args.lines),
+             "--format", "text"], check=False)
+    if p.returncode == 0:
+        print(p.stdout.strip()[-args.chars:])
+
+
+def cmd_models(args):
+    cfg = load_config()
+    print("roles:")
+    for name, spec in (cfg.get("roles") or {}).items():
+        print(f"  {name:14} kind={spec.get('kind','?')} args={spec.get('args',[])}")
+    print("profiles:")
+    for name, spec in (cfg.get("profiles") or {}).items():
+        print(f"  {name:14} kind={spec.get('kind','?')} args={spec.get('args',[])}")
+    print(f"fallback: {cfg.get('fallback') or []}")
+    conn = db()
+    rows = conn.execute("SELECT name,base_url,models FROM providers ORDER BY name").fetchall()
+    print("providers:")
+    for x in rows:
+        print(f"  {x['name']:14} {x['base_url'] or '-'} models={x['models'] or '-'}")
+    if not rows:
+        print("  (none)")
+
+
+def cmd_provider(args):
+    conn = db()
+    if args.action == "list":
+        rows = conn.execute("SELECT * FROM providers ORDER BY name").fetchall()
+        for x in rows:
+            key = (x["api_key"][:4] + "…" + x["api_key"][-4:]) if len(x["api_key"]) > 8 else ("set" if x["api_key"] else "-")
+            print(f"{x['name']:14} {x['base_url'] or '-':40} key={key} models={x['models'] or '-'}")
+        if not rows:
+            print("no providers")
+        return
+    if args.action == "remove":
+        conn.execute("DELETE FROM providers WHERE name=?", (args.name,))
+        conn.commit()
+        print(f"removed provider {args.name}")
+        return
+    if not args.name:
+        die("provider add requires a name")
+    conn.execute(
+        "INSERT INTO providers(name,base_url,api_key,models,created_at) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET base_url=excluded.base_url,api_key=excluded.api_key,models=excluded.models",
+        (args.name, args.base_url or "", args.api_key or "", args.models or "", now()),
+    )
+    conn.commit()
+    print(f"saved provider {args.name}")
+
+
+def cmd_skills(args):
+    conn = db()
+    roots = []
+    if args.repo:
+        roots.append(Path(args.repo).resolve() / ".agents" / "skills")
+    else:
+        for r in conn.execute("SELECT DISTINCT repo FROM threads").fetchall():
+            roots.append(Path(r["repo"]) / ".agents" / "skills")
+    roots += [HOME / ".pi" / "agent" / "skills", HOME / ".config" / "herdr-thread" / "skills"]
+    if args.action == "list":
+        seen = set()
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for d in sorted(root.iterdir()):
+                if d.is_dir() and d.name not in seen:
+                    seen.add(d.name)
+                    print(f"{d.name:28} {d}")
+        if not seen:
+            print("no skills")
+        return
+    if args.action == "path":
+        for root in roots:
+            print(root)
+        return
+    if args.action == "invoke":
+        if not args.thread or not args.name:
+            die("skills invoke <thread> <skill>")
+        r = thread_row(conn, args.thread)
+        target = r["agent_name"] or r["pane_id"]
+        if not target:
+            die("thread has no agent")
+        msg = f"Use the skill `{args.name}`. " + (args.text or "Follow its instructions for the current task.")
+        herdr("agent", "prompt", target, msg)
+        record_turn(conn, r["id"], "user", msg)
+        print(f"invoked {args.name} in {r['id']}")
+        return
+    if not args.name:
+        die("skills show/new requires a name")
+    found = None
+    for root in roots:
+        if (root / args.name / "SKILL.md").exists():
+            found = root / args.name
+            break
+    if args.action == "show":
+        if not found:
+            die(f"skill not found: {args.name}")
+        print((found / "SKILL.md").read_text())
+        return
+    if args.action == "new":
+        repo = Path(args.repo).resolve() if args.repo else None
+        if not repo:
+            die("skills new requires --repo")
+        dst = repo / ".agents" / "skills" / args.name
+        dst.mkdir(parents=True, exist_ok=True)
+        (dst / "SKILL.md").write_text(
+            f"---\nname: {args.name}\ndescription: TODO\n---\n\n# {args.name}\n\nTODO\n")
+        print(dst / "SKILL.md")
+        return
+
+
+def cmd_terminal(args):
+    conn = db()
+    if args.action == "list":
+        conds, params = [], []
+        if args.id:
+            r = thread_row(conn, args.id)
+            conds.append("thread_id=?")
+            params.append(r["id"])
+        q = "SELECT * FROM terminals" + (" WHERE " + " AND ".join(conds) if conds else "") + " ORDER BY id"
+        for x in conn.execute(q, params).fetchall():
+            print(f"[{x['id']}] {x['thread_id']}  {x['label']:16} {x['status']:6} {x['pane_id']}")
+        return
+    if args.action == "new":
+        r = thread_row(conn, args.id)
+        split = herdr("pane", "split", r["pane_id"], "--direction", args.direction,
+                      "--cwd", r["worktree"], "--no-focus")
+        pane = split.get("pane", {}).get("pane_id")
+        if not pane:
+            die(f"unexpected split result: {split}")
+        cur = conn.execute(
+            "INSERT INTO terminals(thread_id,label,pane_id,status,created_at) VALUES(?,?,?,'open',?)",
+            (r["id"], args.label or f"term-{int(time.time())}", pane, now()),
+        )
+        conn.commit()
+        print(f"terminal {cur.lastrowid}  {pane}")
+        return
+    if args.action == "run":
+        if not args.id:
+            die("terminal run requires id")
+        row = conn.execute("SELECT * FROM terminals WHERE id=?", (int(args.id),)).fetchone()
+        if not row:
+            die(f"terminal not found: {args.id}")
+        if not args.command:
+            die("terminal run requires a command")
+        p = subprocess.run(["herdr", "pane", "run", row["pane_id"], args.command], text=True, capture_output=True)
+        if p.returncode != 0:
+            die(f"pane run failed: {p.stderr.strip() or p.stdout.strip()}")
+        print(f"ran in {row['pane_id']}")
+        return
+    if args.action == "close":
+        if not args.id:
+            die("terminal close requires id")
+        row = conn.execute("SELECT * FROM terminals WHERE id=?", (int(args.id),)).fetchone()
+        if not row:
+            die(f"terminal not found: {args.id}")
+        try:
+            herdr("pane", "close", row["pane_id"])
+        except Exception as e:
+            print(f"warning: pane close failed: {e}", file=sys.stderr)
+        conn.execute("UPDATE terminals SET status='closed' WHERE id=?", (row["id"],))
+        conn.commit()
+        print(f"closed terminal {row['id']}")
+
+
 def cmd_runner(args):
     conn = db()
     if args.action not in ("list",) and not args.name:
@@ -1887,7 +2453,7 @@ def cmd_runner(args):
         conn.commit()
         print(f"runner {args.name} -> {args.host}")
         return
-    if args.action in ("up", "down"):
+    if args.action in ("up", "down", "destroy"):
         row = conn.execute("SELECT * FROM runners WHERE name=?", (args.name,)).fetchone()
         if not row and args.host:
             conn.execute("INSERT INTO runners(name,host,repo,status,created_at) VALUES(?,?,?,?,?)",
@@ -1896,9 +2462,10 @@ def cmd_runner(args):
             row = conn.execute("SELECT * FROM runners WHERE name=?", (args.name,)).fetchone()
         if not row:
             die(f"runner not found: {args.name} (use --host or runner add)")
-        script = HOME / ".config" / "herdr-thread" / f"runner-{args.action}.sh"
+        action = "down" if args.action == "destroy" else args.action
+        script = HOME / ".config" / "herdr-thread" / f"runner-{action}.sh"
         if not script.exists():
-            conn.execute("UPDATE runners SET status=? WHERE name=?", ("up" if args.action == "up" else "down", args.name))
+            conn.execute("UPDATE runners SET status=? WHERE name=?", (args.action, args.name))
             conn.commit()
             print(f"runner {args.name} marked {args.action} (no {script})")
             return
@@ -1920,6 +2487,7 @@ def cmd_runner(args):
         if not repo:
             die("bootstrap needs --repo URL (or runner add --repo)")
         remote = (
+            f"set -a; [ -f ~/.herdr-thread-{row['name']}.env ] && . ~/.herdr-thread-{row['name']}.env; set +a; "
             f"set -eu; mkdir -p '{path}'; "
             f"if [ ! -d '{path}/.git' ]; then git clone '{repo}' '{path}'; fi; "
             f"cd '{path}'; "
@@ -1934,7 +2502,69 @@ def cmd_runner(args):
         conn.commit()
         print(f"runner {args.name} bootstrapped at {path}")
         return
-    if args.action == "forward":
+    if args.action == "env":
+        row = conn.execute("SELECT * FROM runners WHERE name=?", (args.name,)).fetchone()
+        if not row:
+            die(f"runner not found: {args.name}")
+        envdir = HOME / ".config" / "herdr-thread" / "runners"
+        envdir.mkdir(parents=True, exist_ok=True)
+        path = envdir / f"{row['name']}.env"
+        values = {}
+        if path.exists():
+            for line in path.read_text().splitlines():
+                if "=" in line and not line.strip().startswith("#"):
+                    k, v = line.split("=", 1)
+                    values[k.strip()] = v.strip()
+        for item in args.set or []:
+            if "=" not in item:
+                die(f"--set needs K=V: {item}")
+            k, v = item.split("=", 1)
+            values[k.strip()] = v
+        path.write_text("\n".join(f"{k}={v}" for k, v in sorted(values.items())) + "\n")
+        os.chmod(path, 0o600)
+        if args.list_env:
+            for k in sorted(values):
+                print(k)
+        else:
+            print(f"{path} ({len(values)} keys)")
+        return
+    if args.action == "push-env":
+        row = conn.execute("SELECT * FROM runners WHERE name=?", (args.name,)).fetchone()
+        if not row:
+            die(f"runner not found: {args.name}")
+        path = HOME / ".config" / "herdr-thread" / "runners" / f"{row['name']}.env"
+        if not path.exists():
+            die(f"no env file: {path}")
+        remote = f"~/.herdr-thread-{row['name']}.env"
+        p = subprocess.run(["scp", str(path), f"{row['host']}:{remote}"], text=True)
+        if p.returncode != 0:
+            die("scp failed")
+        print(f"pushed {path} -> {row['host']}:{remote}")
+        return
+    if args.action == "urls":
+        rows = conn.execute("SELECT * FROM runners WHERE local_port IS NOT NULL ORDER BY name").fetchall()
+        for x in rows:
+            print(f"{x['name']:12} http://127.0.0.1:{x['local_port']}  -> {x['host']}:{x['remote_port']}")
+        if not rows:
+            print("no active forwards")
+        return
+    if args.action == "snapshot":
+        row = conn.execute("SELECT * FROM runners WHERE name=?", (args.name,)).fetchone()
+        if not row:
+            die(f"runner not found: {args.name}")
+        script = HOME / ".config" / "herdr-thread" / "runner-snapshot.sh"
+        if not script.exists():
+            die(f"missing {script}")
+        env = os.environ.copy()
+        env.update({"RUNNER_NAME": row["name"], "RUNNER_HOST": row["host"], "RUNNER_REPO": row["repo"]})
+        p = subprocess.run([str(script)], env=env)
+        if p.returncode != 0:
+            die(f"snapshot failed ({p.returncode})")
+        conn.execute("UPDATE runners SET status='snapshot' WHERE name=?", (row["name"],))
+        conn.commit()
+        print(f"snapshot {row['name']} ok")
+        return
+    if args.action in ("forward", "preview"):
         row = conn.execute("SELECT * FROM runners WHERE name=?", (args.name,)).fetchone()
         if not row:
             die(f"runner not found: {args.name}")
@@ -1964,6 +2594,28 @@ def cmd_share(args):
     conn = db()
     r = thread_row(conn, args.id)
     host = args.host or f"{os.environ.get('USER', 'user')}@{os.uname().nodename}"
+    if args.review or args.html:
+        repos = repo_rows(conn, r)
+        parts = [f"<h1>{html.escape(r['label'])}</h1>",
+                 f"<p>thread <code>{r['id']}</code> · status {r['status']} · review {r['review_state'] or '-'}</p>"]
+        for rr in repos:
+            base = rr["base_sha"] or rr["base_ref"] or "HEAD"
+            diff = git(rr["worktree"], "diff", f"{base}..HEAD", check=False)
+            stat = git(rr["worktree"], "diff", "--stat", f"{base}..HEAD", check=False)
+            parts.append(f"<h2>{html.escape(Path(rr['repo']).name)} · {html.escape(rr['branch'])}</h2>")
+            parts.append(f"<pre>{html.escape(stat or '(no changes)')}</pre>")
+            parts.append(f"<pre>{html.escape(diff)}</pre>")
+        page = ("<!doctype html><meta charset='utf-8'><title>review " + html.escape(r["id"]) +
+                "</title><style>body{font:14px/1.5 ui-monospace,monospace;max-width:1100px;margin:2rem auto;"
+                "padding:0 1rem}pre{background:#111;color:#eee;padding:1rem;overflow:auto}</style>" +
+                "\n".join(parts))
+        out = Path(r["worktree"]) / ".herdr-thread" / "review.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(page)
+        event(conn, r["id"], "share-review", str(out))
+        print(out)
+        print(f"file://{out}")
+        return
     print(f"# thread {r['id']} {r['label']}")
     print(f"# worktree {r['worktree']}")
     print(f"# branch   {r['branch']}")
@@ -2040,10 +2692,12 @@ def cmd_prune(args):
         print("pruned git worktree metadata")
     if args.workspaces:
         workspaces = herdr("workspace", "list").get("workspaces", [])
+        archived_ws = {x["workspace_id"] for x in conn.execute(
+            "SELECT workspace_id FROM threads WHERE archived=1 AND workspace_id IS NOT NULL")}
         stale = []
         for w in workspaces:
             path = (w.get("worktree") or {}).get("checkout_path")
-            if path and not Path(path).exists():
+            if (path and not Path(path).exists()) or w.get("workspace_id") in archived_ws:
                 stale.append(w)
         if stale and not args.yes and not args.dry_run:
             for w in stale:
@@ -2062,6 +2716,159 @@ def cmd_prune(args):
         print(line)
     if not reports and not args.workspaces:
         print("nothing to prune")
+
+
+def cmd_config(args):
+    cfg = load_config()
+    if args.action == "path":
+        print(CONFIG_PATH)
+        print(DB_PATH)
+        return
+    if args.action == "show":
+        print(json.dumps(cfg, ensure_ascii=False, indent=2))
+        return
+    die("config action: show|path")
+
+
+def cmd_delta(args):
+    conn = db()
+    rest = args.rest
+    if args.action == "open":
+        if not rest:
+            die("delta open <id>")
+        cmd_open(argparse.Namespace(id=rest[0]))
+        return
+    if args.action == "thread":
+        if not rest:
+            die("delta thread <new|list|show> ...")
+        sub = rest[0]
+        if sub == "list":
+            cmd_list(argparse.Namespace(all=False, tag=None, bookmarked=False, search=None, json=False))
+        elif sub == "show" and len(rest) > 1:
+            cmd_show(argparse.Namespace(id=rest[1], json=False))
+        elif sub == "new":
+            # delta thread new <label> [--repo ...]
+            sys.argv = ["herdr-thread", "new", *rest[1:]]
+            main()
+        else:
+            die(f"unsupported delta thread: {sub}")
+        return
+    if args.action == "worktree":
+        p = subprocess.run(["herdr", "worktree", *rest], text=True)
+        raise SystemExit(p.returncode)
+    if args.action in ("auth", "mcp", "integration"):
+        print(f"delta {args.action}: managed by the agent/provider config, not herdr-thread")
+        return
+    die(f"unknown delta command: {args.action}")
+
+
+def cmd_restore_db(args):
+    src = Path(args.file).expanduser().resolve()
+    if not src.exists():
+        die(f"backup not found: {src}")
+    db()
+    if DB_PATH.exists():
+        backups = DATA_DIR / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(DB_PATH, backups / f"pre-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
+    shutil.copy2(src, DB_PATH)
+    os.chmod(DB_PATH, 0o600)
+    print(f"restored {DB_PATH} from {src}")
+
+
+def cmd_serve(args):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    pidfile = DATA_DIR / "serve.pid"
+    if args.stop:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text().strip()), signal.SIGTERM)
+            except (ProcessLookupError, ValueError):
+                pass
+            pidfile.unlink(missing_ok=True)
+        print("serve stopped")
+        return
+    if args.status:
+        print(f"serve: running pid={pidfile.read_text().strip()}" if pidfile.exists() else "serve: stopped")
+        return
+    if args.daemon:
+        log = (DATA_DIR / "serve.log").open("a")
+        child = [sys.executable, str(Path(__file__).resolve()), "serve",
+                 "--host", args.host, "--port", str(args.port)]
+        p = subprocess.Popen(child, stdout=log, stderr=log, start_new_session=True)
+        pidfile.write_text(str(p.pid))
+        print(f"serve started pid={p.pid} http://{args.host}:{args.port}")
+        return
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlparse
+
+    def page(title, body):
+        return ("<!doctype html><meta charset='utf-8'><title>" + html.escape(title) +
+                "</title><style>body{font:14px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;"
+                "padding:0 1rem}a{color:#06c}code,pre{font-family:ui-monospace,monospace}"
+                "pre{background:#f4f4f4;padding:1rem;overflow:auto}table{border-collapse:collapse}"
+                "td,th{border-bottom:1px solid #ddd;padding:.3rem .6rem;text-align:left}</style>" + body).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, body, code=200):
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            path = urlparse(self.path).path
+            conn = db()
+            if path == "/api/threads":
+                rows = conn.execute("SELECT * FROM threads ORDER BY created_at DESC").fetchall()
+                body = json.dumps([dict(x) for x in rows], ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == "/":
+                rows = conn.execute("SELECT * FROM threads ORDER BY created_at DESC").fetchall()
+                trs = "".join(
+                    f"<tr><td><a href='/thread/{x['id']}'>{x['id']}</a></td><td>{html.escape(x['label'])}</td>"
+                    f"<td>{html.escape(x['status'])}</td><td>{html.escape(x['review_state'] or '-')}</td>"
+                    f"<td>{html.escape(x['branch'])}</td></tr>" for x in rows)
+                self._send(page("herdr-thread", "<h1>herdr-thread</h1><table><tr><th>id</th><th>label</th>"
+                                                   "<th>status</th><th>review</th><th>branch</th></tr>" + trs + "</table>"))
+                return
+            if path.startswith("/thread/"):
+                tid = path.rsplit("/", 1)[-1]
+                try:
+                    r = thread_row(conn, tid)
+                except SystemExit:
+                    self._send(page("not found", "<h1>not found</h1>"), 404)
+                    return
+                turns = conn.execute("SELECT * FROM turns WHERE thread_id=? AND active=1 ORDER BY seq", (r["id"],)).fetchall()
+                comments = conn.execute("SELECT * FROM comments WHERE thread_id=? ORDER BY id", (r["id"],)).fetchall()
+                repos = repo_rows(conn, r)
+                body = [f"<h1>{html.escape(r['label'])}</h1>",
+                        f"<p>thread <code>{r['id']}</code> · status {html.escape(r['status'])} · "
+                        f"review {html.escape(r['review_state'] or '-')}</p>"]
+                for rr in repos:
+                    body.append(f"<h3>{html.escape(Path(rr['repo']).name)}</h3><p>{html.escape(rr['branch'])} "
+                                f"· {html.escape(rr['pr_url'] or '')}</p>")
+                body.append("<h2>Turns</h2>")
+                for x in turns:
+                    body.append(f"<h4>[{x['id']}] {html.escape(x['role'])}</h4><pre>{html.escape(x['content'])}</pre>")
+                body.append("<h2>Comments</h2>")
+                for x in comments:
+                    body.append(f"<p>[{x['id']}] {html.escape(x['status'])} {html.escape(x['file'])}:{x['line']} "
+                                f"{html.escape(x['body'])}</p>")
+                self._send(page(r["label"], "".join(body)))
+                return
+            self._send(page("not found", "<h1>not found</h1>"), 404)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"serving http://{args.host}:{args.port}")
+    srv.serve_forever()
 
 
 def cmd_backup(args):
@@ -2158,6 +2965,7 @@ def build_parser():
     tu.add_argument("--edit", type=int)
     tu.add_argument("--text")
     tu.add_argument("--revert", type=int)
+    tu.add_argument("--reseed", action="store_true")
     tu.add_argument("--limit", type=int, default=50)
     tu.add_argument("--json", action="store_true")
     tu.set_defaults(func=cmd_turn)
@@ -2190,6 +2998,7 @@ def build_parser():
     at = sub.add_parser("attach", help="attach a file to a thread worktree")
     at.add_argument("id")
     at.add_argument("file", nargs="?")
+    at.add_argument("--text")
     at.add_argument("--list", action="store_true")
     at.set_defaults(func=cmd_attach)
 
@@ -2224,7 +3033,9 @@ def build_parser():
     ld.add_argument("id", nargs="*")
     ld.add_argument("--all", action="store_true")
     ld.add_argument("--tag")
-    ld.add_argument("--strategy", choices=["push", "pr", "merge", "merge-pr", "hook"])
+    ld.add_argument("--strategy", choices=["push", "pr", "merge", "merge-pr", "local", "skill", "hook"])
+    ld.add_argument("--target")
+    ld.add_argument("--skip-deps", action="store_true")
     ld.add_argument("--into")
     ld.add_argument("--title")
     ld.add_argument("--body")
@@ -2250,6 +3061,52 @@ def build_parser():
     o.add_argument("id")
     o.set_defaults(func=cmd_open)
 
+    ch = sub.add_parser("children", help="show child threads")
+    ch.add_argument("id")
+    ch.add_argument("--json", action="store_true")
+    ch.set_defaults(func=cmd_children)
+
+    rs = sub.add_parser("resume", help="rebind/focus a thread and start agent if needed")
+    rs.add_argument("id")
+    rs.set_defaults(func=cmd_resume)
+
+    rn = sub.add_parser("rename", help="rename a thread")
+    rn.add_argument("id")
+    rn.add_argument("label")
+    rn.set_defaults(func=cmd_rename)
+
+    dl = sub.add_parser("delete", help="archive/purge a thread")
+    dl.add_argument("id")
+    dl.add_argument("--keep-worktree", action="store_true")
+    dl.add_argument("--purge", action="store_true")
+    dl.set_defaults(func=cmd_delete)
+
+    rt = sub.add_parser("restore-thread", help="unarchive a thread")
+    rt.add_argument("id")
+    rt.set_defaults(func=cmd_restore_thread)
+
+    mn = sub.add_parser("mention", help="attach a file and prompt the agent")
+    mn.add_argument("id")
+    mn.add_argument("file")
+    mn.add_argument("--text")
+    mn.set_defaults(func=cmd_mention)
+
+    gd = sub.add_parser("guide", help="write a review guide")
+    gd.add_argument("id")
+    gd.add_argument("--print", action="store_true")
+    gd.set_defaults(func=cmd_guide)
+
+    dp = sub.add_parser("depend", help="thread dependencies")
+    dp.add_argument("id")
+    dp.add_argument("--on")
+    dp.add_argument("--remove", action="store_true")
+    dp.add_argument("--list", action="store_true")
+    dp.set_defaults(func=cmd_depend)
+
+    cr = sub.add_parser("check-remote", help="compare local branch with origin")
+    cr.add_argument("id")
+    cr.set_defaults(func=cmd_check_remote)
+
     df = sub.add_parser("diff", help="print committed + uncommitted diff")
     df.add_argument("id")
     df.set_defaults(func=cmd_diff)
@@ -2264,6 +3121,7 @@ def build_parser():
 
     sy = sub.add_parser("sync", help="refresh thread states, optionally rebase / poll PRs")
     sy.add_argument("--rebase", action="store_true")
+    sy.add_argument("--merge", action="store_true", dest="merge_upstream", help="fetch + merge upstream")
     sy.add_argument("--pr", action="store_true", help="poll GitHub PR/CI state")
     sy.add_argument("--json", action="store_true")
     sy.set_defaults(func=cmd_sync)
@@ -2297,7 +3155,7 @@ def build_parser():
     f.add_argument("--agent")
     f.add_argument("--no-agent", action="store_true")
     f.add_argument("--prompt")
-    f.add_argument("--with-context", action="store_true")
+    f.add_argument("--with-context", "--conversation", dest="with_context", action="store_true")
     f.add_argument("--from-turn", type=int)
     f.add_argument("--focus", action="store_true")
     f.set_defaults(func=cmd_fork)
@@ -2324,20 +3182,66 @@ def build_parser():
     jn.add_argument("--no-send", action="store_true")
     jn.set_defaults(func=cmd_join)
 
+    of = sub.add_parser("openfile", help="resolve a file in the thread worktree")
+    of.add_argument("id")
+    of.add_argument("file")
+    of.add_argument("--line", type=int)
+    of.set_defaults(func=cmd_openfile)
+
+    fl = sub.add_parser("follow", help="focus a subagent and print its recent output")
+    fl.add_argument("parent")
+    fl.add_argument("sub")
+    fl.add_argument("--lines", type=int, default=80)
+    fl.add_argument("--chars", type=int, default=4000)
+    fl.set_defaults(func=cmd_follow)
+
+    md = sub.add_parser("models", help="list roles/profiles/providers")
+    md.set_defaults(func=cmd_models)
+
+    pv = sub.add_parser("provider", help="manage model providers")
+    pv.add_argument("action", choices=["list", "add", "remove"])
+    pv.add_argument("name", nargs="?")
+    pv.add_argument("--base-url")
+    pv.add_argument("--api-key")
+    pv.add_argument("--models")
+    pv.set_defaults(func=cmd_provider)
+
+    sk = sub.add_parser("skills", help="list/show/create/invoke repo skills")
+    sk.add_argument("action", choices=["list", "show", "new", "path", "invoke"])
+    sk.add_argument("name", nargs="?")
+    sk.add_argument("--repo")
+    sk.add_argument("--thread")
+    sk.add_argument("--text")
+    sk.set_defaults(func=cmd_skills)
+
+    tm = sub.add_parser("terminal", help="thread-scoped terminals")
+    tm.add_argument("action", choices=["list", "new", "run", "close"])
+    tm.add_argument("id", nargs="?")
+    tm.add_argument("--label")
+    tm.add_argument("--direction", choices=["right", "down"], default="down")
+    tm.add_argument("--command")
+    tm.set_defaults(func=cmd_terminal)
+
     rn = sub.add_parser("runner", help="remote/cloud runner lifecycle")
-    rn.add_argument("action", choices=["list", "add", "up", "down", "bootstrap", "forward", "unforward"])
+    rn.add_argument("action", choices=["list", "add", "up", "down", "destroy", "bootstrap",
+                                       "forward", "unforward", "preview", "urls", "env",
+                                       "push-env", "snapshot"])
     rn.add_argument("name", nargs="?")
     rn.add_argument("--host")
     rn.add_argument("--repo")
     rn.add_argument("--path")
     rn.add_argument("--local", type=int, default=8080)
     rn.add_argument("--remote", type=int, default=3000)
+    rn.add_argument("--set", action="append")
+    rn.add_argument("--list-env", action="store_true")
     rn.set_defaults(func=cmd_runner)
 
     sh = sub.add_parser("share", help="print remote attach / collaboration instructions")
     sh.add_argument("id")
     sh.add_argument("--host")
     sh.add_argument("--write", action="store_true")
+    sh.add_argument("--review", action="store_true", help="write a standalone review HTML bundle")
+    sh.add_argument("--html", action="store_true")
     sh.set_defaults(func=cmd_share)
 
     m = sub.add_parser("machines", help="list saved herdr SSH machines")
@@ -2363,6 +3267,27 @@ def build_parser():
     pn.add_argument("--dry-run", action="store_true")
     pn.add_argument("--yes", action="store_true")
     pn.set_defaults(func=cmd_prune)
+
+    cf = sub.add_parser("config", help="show effective config / paths")
+    cf.add_argument("action", choices=["show", "path"])
+    cf.set_defaults(func=cmd_config)
+
+    dl = sub.add_parser("delta", help="Delta-compatible command aliases")
+    dl.add_argument("action", choices=["open", "thread", "worktree", "auth", "mcp", "integration"])
+    dl.add_argument("rest", nargs=argparse.REMAINDER)
+    dl.set_defaults(func=cmd_delta)
+
+    rdb = sub.add_parser("restore-db", help="restore threads.db from a backup")
+    rdb.add_argument("file")
+    rdb.set_defaults(func=cmd_restore_db)
+
+    sv = sub.add_parser("serve", help="local web dashboard / inbox")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--daemon", action="store_true")
+    sv.add_argument("--stop", action="store_true")
+    sv.add_argument("--status", action="store_true")
+    sv.set_defaults(func=cmd_serve)
 
     bk = sub.add_parser("backup", help="back up the thread database")
     bk.set_defaults(func=cmd_backup)

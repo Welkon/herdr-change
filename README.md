@@ -69,7 +69,16 @@ herdr-thread watch --daemon --interval 60
 herdr-thread watch --status
 herdr-thread watch --stop
 
-# 8. 清理 / 恢复
+# 8. 生命周期 / 审查包 / 本地 Web
+herdr-thread children <id>
+herdr-thread resume <id>
+herdr-thread rename <id> "new label"
+herdr-thread delete <id> --keep-worktree
+herdr-thread guide <id>                 # review guide markdown
+herdr-thread share <id> --review        # 独立 review HTML
+herdr-thread serve --daemon             # http://127.0.0.1:8765
+
+# 9. 清理 / 恢复
 herdr-thread cleanup <id>
 herdr-thread recover --create      # herdr 重启/workspace 丢失后重新绑定
 herdr-thread prune --workspaces --dry-run
@@ -101,14 +110,30 @@ thread
 | `prompt` | 给 Agent 发指令；`--wait` |
 | `capture` | 读取 agent 输出并写入 turns |
 | `transcript` | 浏览 turns；`--search --bookmarked` |
-| `turn` | `--add/--list/--bookmark/--edit/--revert` |
+| `turn` | `--add/--list/--bookmark/--edit/--revert/--reseed` |
 | `search` | 跨线程搜索 turns |
 | `review` | 打开 reviewr；`--reviewer` 起只读审查 agent；`--verdict` |
 | `comment` | 行内评论：新增 / `--list` / `--send` / `--resolve` |
-| `attach` | 附件复制到 worktree `.herdr-thread/attachments` |
+| `attach` | 文件或 `--text` 附件复制到 worktree `.herdr-thread/attachments` |
 | `send` | 把文本/transcript 发给另一个线程的 agent |
+| `children` | 子线程树 |
+| `resume` | 重新绑定/聚焦线程，必要时启动 agent |
+| `rename` / `delete` / `restore-thread` | 线程生命周期 |
+| `mention` / `openfile` | 附件并提示 Agent / 解析 worktree 文件 |
+| `guide` | 生成 review guide（commits/files/reviewer notes） |
+| `share --review` | 生成独立 review HTML |
+| `depend` | 线程依赖；`land` 会检查/拓扑排序 |
+| `check-remote` | 对比本地 branch 与 origin |
+| `subagent follow` | `follow <parent> <sub>` 聚焦并读子 Agent |
+| `models` / `provider` | 角色、profile、fallback、provider 管理 |
+| `skills` | list/show/new/path/invoke |
+| `terminal` | 线程级终端 list/new/run/close |
+| `serve` | 本地 Web dashboard / inbox |
+| `config` | 显示有效配置/路径 |
+| `delta` | Delta 风格别名：open/thread/worktree |
+| `restore-db` | 从 backup 恢复 threads.db |
 | `checkpoint` | 提交 / `--list` / `--restore`，每个 repo 单独记录 |
-| `land` | `push/pr/merge/merge-pr/hook`；批量 `--all/--tag`；dirty/verdict/pre-land gate |
+| `land` | `push/pr/merge/merge-pr/local/skill/hook`；批量 `--all/--tag`；dirty/verdict/pre-land/deps gate |
 | `pr` | 查看 / `--watch` PR + CI |
 | `sync` | 刷新 agent 状态；`--rebase`（先 fetch）；`--pr` |
 | `watch` | 后台轮询；`--daemon/--status/--stop` |
@@ -121,7 +146,7 @@ thread
 | `recover` | 重新绑定 workspace/pane/agent；`--create/--start/--prune` |
 | `machines` | 列出 herdr SSH machines |
 | `remote` | 透传远端命令：`remote mini agent list` |
-| `runner` | 远端 runner 生命周期：add/up/down/bootstrap/forward/unforward |
+| `runner` | add/up/down/destroy/bootstrap/forward/preview/unforward/urls/env/push-env/snapshot |
 | `share` | 打印远程 attach / 协作说明 |
 | `notify` | 桌面通知 |
 | `backup` | 备份 threads.db |
@@ -198,10 +223,13 @@ THREAD_ID THREAD_LABEL REPO WORKTREE BRANCH REPOS
 `runner` 使用 `~/.config/herdr-thread/runner-up.sh` / `runner-down.sh`，环境变量
 `RUNNER_NAME RUNNER_HOST RUNNER_REPO`。
 
-## 明确不追
+## 本地等价物
 
-DeltaDB/CRDT、Web 端、富文本多人协作、托管 Cloud Runner。远端/临时 runner 是脚本化流程，
-见 [RUNNER.md](RUNNER.md)。
+- Web/Inbox：`herdr-thread serve` 本地 dashboard，读取同一 SQLite
+- 共享 review：`share --review` 生成独立 HTML bundle
+- Cloud Runner：`runner` + SSH/脚本 + env/preview/snapshot，见 [RUNNER.md](RUNNER.md)
+- CRDT：不引入；以 SQLite 单写 + serve 轮询保证一致性
+- 对话编辑/回退：`turn --edit/--revert --reseed` 重写 canonical context 文件并通知 Agent
 
 ## 开发
 

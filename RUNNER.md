@@ -137,3 +137,19 @@ herdr-thread runner list
 
 `runner bootstrap` 只依赖 SSH，不假设云厂商；创建/销毁临时机器仍由
 Tailscale/云 CLI/本地 VM 负责。
+
+## 7. Env / preview / snapshot
+
+```bash
+herdr-thread runner env mini --set OPENAI_API_KEY=... --set DATABASE_URL=...
+herdr-thread runner env mini --list-env
+herdr-thread runner push-env mini          # scp 到远端 ~/.herdr-thread-mini.env
+herdr-thread runner bootstrap mini --repo ... # 自动 source 该 env
+
+herdr-thread runner preview mini --local 8080 --remote 3000
+herdr-thread runner urls
+herdr-thread runner snapshot mini          # 调 runner-snapshot.sh
+```
+
+环境文件在 `~/.config/herdr-thread/runners/<name>.env`，权限 600。
+`runner-snapshot.sh` 由用户提供（云厂商快照、VM image、或 rsync 都行）。

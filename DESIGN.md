@@ -259,3 +259,23 @@ backup  prune  doctor
 - 工程化：`backup`、`prune`、`HERDR_THREAD_DATA/CONFIG`、`pyproject.toml`、`tests/smoke.sh`
 
 仍不追：DeltaDB/CRDT、Web 端、富文本多人协作、托管 Cloud Runner。
+
+---
+
+## 7. v0.3 补齐（2026-10）
+
+- Thread 生命周期：`children/resume/rename/delete/restore-thread`、`mention/openfile`
+- 对话编辑：`turn --edit/--revert --reseed` 写 canonical context 并重新对齐 Agent
+- Review：`guide`、`share --review` HTML、`check-remote`
+- Land：依赖 `depend` + 拓扑排序、`local`/`skill` 策略、`--skip-deps`
+- Sync：`--rebase` 与 `--merge` 都先 fetch
+- 子 Agent：`follow` 聚焦/读取
+- 模型：`models`、`provider`（base URL/key/models）
+- Skills：list/show/new/path/invoke
+- Terminal：线程级 list/new/run/close
+- Runner：env/push-env/preview/urls/snapshot/destroy
+- Web/Inbox：`serve` 本地 dashboard、API `/api/threads`
+- CLI：`config`、`delta` 别名、`restore-db`
+- 工程：单元测试 + GitHub Actions、SQLite `user_version=3`
+
+本地等价物：Web/CRDT/托管 runner 用 `serve` + SQLite 单写、review HTML、SSH 脚本替代。
