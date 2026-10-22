@@ -2947,7 +2947,7 @@ KEYS_BLOCK = """
 key = "prefix+t"
 type = "popup"
 width = "52%"
-height = "30%"
+height = "46%"
 command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-task-$$; /home/felix/.local/bin/herdr-thread ui task --result \"$result\" 2>>/tmp/herdr-thread-ui.log; task=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; [ -n \"$task\" ] && exec /home/felix/.local/bin/herdr-thread task \"$task\""
 description = "herdr-thread: new task"
 
@@ -2961,7 +2961,7 @@ description = "herdr-thread: review current"
 key = "prefix+alt+d"
 type = "popup"
 width = "52%"
-height = "40%"
+height = "50%"
 command = "export TERM=\"${TERM:-xterm-256color}\"; result=/tmp/herdr-thread-ui-done-$$; /home/felix/.local/bin/herdr-thread ui done --result \"$result\" 2>>/tmp/herdr-thread-ui.log; ans=$(cat \"$result\" 2>/dev/null); rm -f \"$result\"; case \"$ans\" in p) exec /home/felix/.local/bin/herdr-thread done-here;; r) exec /home/felix/.local/bin/herdr-thread done-here --pr;; *) exit 0;; esac"
 description = "herdr-thread: done current"
 """
@@ -3008,33 +3008,50 @@ def _ui_task():
         curses.curs_set(1)
         _ui_colors()
         text = ""
+        focus = 0      # 0 = input, 1 = buttons
+        button = 0     # 0 = OK, 1 = Cancel
         while True:
             h, w = stdscr.getmaxyx()
             stdscr.erase()
             bw = max(36, min(w - 8, 68))
             x = max(2, (w - bw) // 2)
-            y = 1
-            footer = min(y + 8, max(0, h - 2))
+            compact = h < 10
+            y = 0 if compact else 1
+            task_row = y + 2 if compact else y + 3
+            input_row = task_row + 1
+            underline = input_row + 1
+            footer = min(underline + 2, max(0, h - 2))
             try:
                 stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
                 stdscr.addnstr(y, x, "herdr-thread", bw)
                 stdscr.attrset(curses.color_pair(6))
                 stdscr.addnstr(y, x + 13, "  new task", bw - 13)
                 stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
-                stdscr.addnstr(y + 3, x, "Task", bw)
+                stdscr.addnstr(task_row, x, "Task", bw)
                 stdscr.attrset(curses.A_NORMAL)
-                stdscr.addnstr(y + 4, x, "\u203a ", 2)
+                stdscr.addnstr(input_row, x, "\u203a ", 2)
                 field = text[-(bw - 3):]
-                stdscr.addnstr(y + 4, x + 2, field, bw - 2)
+                stdscr.addnstr(input_row, x + 2, field, bw - 2)
                 stdscr.attrset(curses.color_pair(6))
                 for i in range(min(bw, w - x - 1)):
-                    stdscr.addch(y + 5, x + i, curses.ACS_HLINE)
-                stdscr.attrset(curses.color_pair(4) | curses.A_BOLD)
+                    stdscr.addch(underline, x + i, curses.ACS_HLINE)
+
+                ok_attr = curses.color_pair(5) | curses.A_BOLD if focus == 1 and button == 0 else curses.color_pair(4)
+                cancel_attr = curses.color_pair(5) | curses.A_BOLD if focus == 1 and button == 1 else curses.color_pair(4)
+                stdscr.attrset(ok_attr)
                 stdscr.addnstr(footer, x, "  Enter  OK  ", 13)
-                stdscr.attrset(curses.color_pair(4))
+                stdscr.attrset(cancel_attr)
                 stdscr.addnstr(footer, x + 15, "  Esc  Cancel  ", 15)
+                stdscr.attrset(curses.color_pair(6))
+                hint = "Tab buttons   Enter create" if focus == 0 else "\u2190\u2192 choose   Enter confirm   Esc cancel"
+                if footer + 2 < h:
+                    stdscr.addnstr(footer + 2, x, hint, max(1, bw))
                 stdscr.attrset(curses.A_NORMAL)
-                stdscr.move(y + 4, x + 2 + _display_width(field))
+                if focus == 0:
+                    curses.curs_set(1)
+                    stdscr.move(input_row, x + 2 + _display_width(field))
+                else:
+                    curses.curs_set(0)
                 stdscr.refresh()
             except curses.error:
                 pass
@@ -3044,9 +3061,29 @@ def _ui_task():
                 continue
             if ch == "\x1b":
                 return None
+            if ch == "\t":
+                focus = 1 - focus
+                button = 0
+                continue
+            if focus == 1:
+                if ch in (curses.KEY_LEFT, "h"):
+                    button = 0
+                elif ch in (curses.KEY_RIGHT, "l", "\t"):
+                    button = 1
+                elif ch in ("\n", "\r", curses.KEY_ENTER):
+                    if button != 0:
+                        return None
+                    return text.strip() or None
+                elif isinstance(ch, str) and ch in ("o", "O"):
+                    return text.strip() or None
+                elif isinstance(ch, str) and ch in ("c", "C"):
+                    return None
+                continue
             if ch in ("\n", "\r", curses.KEY_ENTER):
-                return text.strip() or None
-            if ch in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                if text.strip():
+                    return text.strip()
+                focus = 1
+            elif ch in (curses.KEY_BACKSPACE, "\x7f", "\b"):
                 text = text[:-1]
             elif isinstance(ch, str) and ch.isprintable():
                 text += ch
@@ -3072,17 +3109,18 @@ def _ui_done():
             stdscr.erase()
             bw = max(40, min(w - 8, 68))
             x = max(2, (w - bw) // 2)
-            y = 1
-            footer = min(y + 8, max(0, h - 2))
+            compact = h < 10
+            y = 0 if compact else 1
+            footer = max(0, h - 2)
             try:
                 stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
                 stdscr.addnstr(y, x, "herdr-thread", bw)
                 stdscr.attrset(curses.color_pair(6))
                 stdscr.addnstr(y, x + 13, "  finish", bw - 13)
                 stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
-                stdscr.addnstr(y + 2, x, "What next?", bw)
+                stdscr.addnstr(y + (1 if compact else 2), x, "What next?", bw)
                 for i, (key, label, hint) in enumerate(options):
-                    row = y + 3 + i
+                    row = y + (2 if compact else 3) + i
                     if i == selected:
                         stdscr.attrset(curses.color_pair(5) | curses.A_BOLD)
                         stdscr.addnstr(row, x, f"  {label}  ", bw)
@@ -3097,6 +3135,9 @@ def _ui_done():
                 stdscr.addnstr(footer, x, "  Enter  Select  ", 17)
                 stdscr.attrset(curses.color_pair(4))
                 stdscr.addnstr(footer, x + 19, "  Esc  Cancel  ", 15)
+                stdscr.attrset(curses.color_pair(6))
+                if footer + 2 < h:
+                    stdscr.addnstr(footer + 2, x, "\u2191\u2193 or j/k move   Enter confirm", max(1, bw))
                 stdscr.attrset(curses.A_NORMAL)
                 stdscr.refresh()
             except curses.error:
