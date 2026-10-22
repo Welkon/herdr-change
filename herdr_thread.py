@@ -1444,12 +1444,13 @@ def cleanup_thread(conn, r, force=False):
         try:
             herdr("worktree", "remove", "--workspace", ws, "--force")
         except Exception as e:
-            ok = False
-            print(f"warning: herdr worktree remove failed: {e}", file=sys.stderr)
-        try:
-            herdr("workspace", "close", ws)
-        except Exception:
-            pass
+            if "not_linked_worktree" not in str(e):
+                print(f"warning: herdr worktree remove failed: {e}", file=sys.stderr)
+            try:
+                herdr("workspace", "close", ws)
+            except Exception as ce:
+                ok = False
+                print(f"warning: workspace close failed for {ws}: {ce}", file=sys.stderr)
     for rr in repos:
         if not Path(rr["worktree"]).exists():
             continue
