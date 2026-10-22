@@ -179,14 +179,17 @@ notify = true
 
 [profiles.worker]
 kind = "codex"
+args = []
 prompt = "你是实现子 Agent，只做被指派的子任务，完成后总结改动和验证。"
 
 [profiles.scout]
 kind = "codex"
+args = []
 prompt = "你是调研子 Agent，只读代码并给出结论，不改文件。"
 
 [profiles.reviewer]
 kind = "codex"
+args = []
 prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏测试和回退建议。"
 ```
 
@@ -194,10 +197,10 @@ prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏�
 
 ## 3. 分阶段
 
-- **P0（本次）**：`new/list/show/prompt/status/review/checkpoint/land/cleanup/open` + DB + 配置。
-- **P1**：`fork/subagent/sync --rebase/tag/archive`、状态轮询 + 通知。
-- **P2**：land skill、批量 land、PR/CI 状态、review verdict 持久化。
-- **P3**：remote/collab（`herdr --remote` 封装）、临时 runner 脚本、Web 不做。
+- **P0（已完成）**：`new/list/show/diff/prompt/review/checkpoint/land/cleanup/open` + DB + 配置。
+- **P1（已完成）**：`fork/subagent/sync --rebase/tag/archive`、状态轮询 + 通知、`.agents/prepare|setup` 钩子。
+- **P2（部分完成）**：review verdict 持久化 + `review --reviewer` 已完成；批量 land、PR/CI 状态轮询待做。
+- **P3（部分完成）**：`machines/remote/notify` 透传与 RUNNER.md 已完成；临时 runner 目前是脚本化流程，未做托管。
 
 ---
 
@@ -206,3 +209,28 @@ prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏�
 - **不复制**：DeltaDB/CRDT、每轮增量快照、Web 端、富文本多人协作、云端临时 runner 的托管体验。
 - **保留**：git 作为唯一事实来源；Agent 自己的会话/技能/MCP 配置；reviewr 的审查体验。
 - **优势**：原生 WSL、无 GUI/DPI/光标/Portal 问题；可脚本化；换 Agent 不改工作流。
+
+
+---
+
+## 5. 实现状态（v0.1，2026-10）
+
+已落地命令：
+
+```
+new  list  show  setup  prompt  review  checkpoint  land  cleanup
+open  diff  tag  sync  fork  subagent  machines  remote  notify  doctor
+```
+
+已验证：
+
+- dummy repo：`new → reviewr → agent → prompt → sync → checkpoint → review --reviewer → land merge → cleanup`；
+- `.agents/prepare` + `.agents/setup` 在新 worktree 内执行；
+- `QP-GD26-0901`：`new --no-agent` 创建/清理后 `git worktree list` 无残留。
+
+已知边界：
+
+- 每条 thread 绑定一个 repo；跨仓任务用多个 thread。
+- 远端 thread 的 DB 在远端机器，本地 `remote` 只做命令透传。
+- reviewr 的行内评论由插件回传 Agent；`herdr-thread` 不复制评论内容。
+- 不做每轮自动快照；用 `checkpoint` 显式建提交作为回退点。
