@@ -108,9 +108,12 @@ def db() -> sqlite3.Connection:
         """
     )
     cols = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
-    for col in ("reviewer_pane_id", "reviewer_agent"):
+    for col in ("reviewer_pane_id", "reviewer_agent", "pr_url", "pr_state", "ci_state",
+                "mergeable", "last_sync_at"):
         if col not in cols:
             conn.execute(f"ALTER TABLE threads ADD COLUMN {col} TEXT")
+    if "pr_number" not in cols:
+        conn.execute("ALTER TABLE threads ADD COLUMN pr_number INTEGER")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS events (
@@ -243,6 +246,8 @@ def status_line(row, states: dict, info: dict) -> str:
     if info["behind"] and info["behind"] != "0":
         flags.append(f"behind:{info['behind']}")
     rev = f" review:{row['review_state']}" if row["review_state"] else ""
+    if row["pr_url"]:
+        flags.append(f"pr:{row['pr_state'] or '?'}/{row['ci_state'] or '-'}")
     flags_s = " ".join(flags)
     return f"{row['id']}  {row['label'][:24]:24}  {astate:8}  {row['status']:8}{rev:14} {flags_s}"
 
@@ -444,6 +449,8 @@ def cmd_show(args):
     print(f"  workspace   {r['workspace_id']}  agent_pane={r['pane_id']}  reviewr={r['review_pane_id'] or '-'}")
     if r["reviewer_agent"]:
         print(f"  reviewer    {r['reviewer_agent']} ({r['reviewer_pane_id'] or '-'})")
+    if r["pr_url"]:
+        print(f"  pr          {r['pr_url']}  state={r['pr_state'] or '-'} ci={r['ci_state'] or '-'} mergeable={r['mergeable'] or '-'}")
     print(f"  git         head={info['head']} dirty={info['dirty']} ahead={info['ahead'] or '-'} behind={info['behind'] or '-'}")
     if r["tags"]:
         print(f"  tags        {r['tags']}")
@@ -456,6 +463,109 @@ def cmd_show(args):
         print("  recent commits:")
         for line in log.splitlines():
             print("   ", line)
+
+
+PR_FIELDS = "state,isDraft,mergeable,reviewDecision,statusCheckRollup,url,number,title,headRefName,baseRefName"
+
+
+def gh_pr_view(pr_url: str, cwd: str) -> dict:
+    p = run(["gh", "pr", "view", pr_url, "--json", PR_FIELDS], cwd=cwd, check=False)
+    if p.returncode != 0:
+        raise RuntimeError(f"gh pr view failed: {p.stderr.strip() or p.stdout.strip()}")
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"gh pr view returned non-JSON: {p.stdout[:200]}")
+
+
+def ci_state(rollup) -> str:
+    if not rollup:
+        return "none"
+    pending_states = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED"}
+    fail_states = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+    failed = pending = False
+    for c in rollup:
+        if c.get("__typename") == "CheckRun" or "conclusion" in c:
+            status = (c.get("status") or "").upper()
+            concl = (c.get("conclusion") or "").upper()
+            if concl in fail_states:
+                failed = True
+            elif status in pending_states or concl in pending_states or not concl:
+                pending = True
+        else:
+            state = (c.get("state") or "").upper()
+            if state in fail_states:
+                failed = True
+            elif state in pending_states:
+                pending = True
+    if failed:
+        return "failure"
+    if pending:
+        return "pending"
+    return "success"
+
+
+def update_pr(conn, cfg, r, data: dict) -> bool:
+    old_state, old_ci = r["pr_state"], r["ci_state"]
+    state = data.get("state") or ""
+    ci = ci_state(data.get("statusCheckRollup"))
+    mergeable = data.get("mergeable") or ""
+    status = r["status"]
+    landed_at = r["landed_at"]
+    if state == "MERGED":
+        status = "landed"
+        landed_at = landed_at or now()
+    elif state == "CLOSED" and status in ("pr_open", "review", "working"):
+        status = "closed"
+    conn.execute(
+        "UPDATE threads SET pr_state=?, ci_state=?, mergeable=?, last_sync_at=?, status=?, landed_at=? WHERE id=?",
+        (state, ci, mergeable, now(), status, landed_at, r["id"]),
+    )
+    conn.commit()
+    changed = (old_state != state) or (old_ci != ci)
+    if changed:
+        event(conn, r["id"], "pr", f"{old_state or '-'}->{state or '-'} ci {old_ci or '-'}->{ci}")
+        if cfg.get("notify", True):
+            try:
+                sound = "done" if state == "MERGED" or ci == "success" else "request"
+                herdr("notification", "show", f"PR {state or '?'}: {r['label']}",
+                      "--body", f"{r['pr_url']} · CI {ci}", "--sound", sound)
+            except Exception:
+                pass
+    return changed
+
+
+def cmd_pr(args):
+    cfg = load_config()
+    conn = db()
+    r = thread_row(conn, args.id)
+    if not r["pr_url"]:
+        die(f"thread {r['id']} has no PR; use land --strategy pr")
+    deadline = time.time() + args.timeout
+    last = None
+    while True:
+        data = gh_pr_view(r["pr_url"], r["repo"])
+        update_pr(conn, cfg, r, data)
+        r = thread_row(conn, args.id)
+        state = data.get("state")
+        summary = {
+            "id": r["id"], "url": r["pr_url"], "state": state, "ci": r["ci_state"],
+            "mergeable": data.get("mergeable"), "review": data.get("reviewDecision"),
+            "draft": data.get("isDraft"), "title": data.get("title"),
+            "checks": len(data.get("statusCheckRollup") or []),
+        }
+        if args.json:
+            print(json.dumps(summary, ensure_ascii=False))
+        else:
+            print(f"{r['id']}  {state}  ci={summary['ci']}  mergeable={summary['mergeable'] or '-'} "
+                  f"review={summary['review'] or '-'} checks={summary['checks']}")
+            print(f"  {r['pr_url']}")
+        if not args.watch or state in ("MERGED", "CLOSED") or time.time() >= deadline:
+            break
+        time.sleep(args.interval)
+    if args.watch and state not in ("MERGED", "CLOSED"):
+        print("watch timed out", file=sys.stderr)
+        raise SystemExit(2)
 
 
 def cmd_prompt(args):
@@ -560,49 +670,65 @@ def cmd_checkpoint(args):
     print(f"checkpoint {head}  {msg}")
 
 
-def cmd_land(args):
-    cfg = load_config()
-    conn = db()
-    r = thread_row(conn, args.id)
+def _land_one(cfg, conn, r, args) -> str:
     if r["status"] == "landed":
-        die(f"thread {r['id']} already landed")
+        raise RuntimeError(f"thread {r['id']} already landed")
+    if r["status"] == "cleaned":
+        raise RuntimeError(f"thread {r['id']} already cleaned")
     wt = r["worktree"]
     strategy = args.strategy or cfg["land_strategy"]
     branch = r["branch"]
+    title = args.title or r["label"]
+    body = args.body or f"Thread {r['id']} managed by herdr-thread."
 
     if strategy == "push":
         origin = git(wt, "remote", "get-url", "origin", check=False)
         if not origin:
-            die("no origin remote. Add one (`git remote add origin <url>`) or use --strategy merge")
+            raise RuntimeError("no origin remote. Add one (`git remote add origin <url>`) or use --strategy merge")
         p = run(["git", "-C", wt, "push", "-u", "origin", branch], check=False)
         if p.returncode != 0:
-            die(f"push failed: {p.stderr.strip() or p.stdout.strip()}")
-        print(f"pushed {branch} -> {origin}")
+            raise RuntimeError(f"push failed: {p.stderr.strip() or p.stdout.strip()}")
+        msg = f"pushed {branch} -> {origin}"
+        conn.execute("UPDATE threads SET status='landed', landed_at=? WHERE id=?", (now(), r["id"]))
     elif strategy == "pr":
         origin = git(wt, "remote", "get-url", "origin", check=False)
         if not origin:
-            die("no origin remote; cannot create PR")
-        title = args.title or r["label"]
-        body = args.body or f"Thread {r['id']} managed by herdr-thread."
-        p = run(["gh", "pr", "create", "--head", branch, "--title", title, "--body", body], cwd=wt, check=False)
+            raise RuntimeError("no origin remote; cannot create PR")
+        p = run(["git", "-C", wt, "push", "-u", "origin", branch], check=False)
         if p.returncode != 0:
-            die(f"gh pr create failed: {p.stderr.strip() or p.stdout.strip()}")
-        print(p.stdout.strip())
+            raise RuntimeError(f"push failed: {p.stderr.strip() or p.stdout.strip()}")
+        p = run(["gh", "pr", "create", "--head", branch, "--title", title, "--body", body],
+                cwd=wt, check=False)
+        if p.returncode != 0:
+            raise RuntimeError(f"gh pr create failed: {p.stderr.strip() or p.stdout.strip()}")
+        out = p.stdout.strip()
+        m = re.search(r"https://\S+/pull/(\d+)", out)
+        url = m.group(0) if m else (out.splitlines()[-1] if out else "")
+        number = int(m.group(1)) if m else None
+        conn.execute(
+            "UPDATE threads SET pr_url=?, pr_number=?, pr_state='OPEN', status='pr_open', landed_at=NULL WHERE id=?",
+            (url, number, r["id"]),
+        )
+        msg = f"PR {url or 'created'}"
     elif strategy == "merge":
         into = args.into
         if not into:
-            die("--strategy merge requires --into <branch>")
+            raise RuntimeError("--strategy merge requires --into <branch>")
         if git(r["repo"], "status", "--porcelain", check=False).strip():
-            die("source repo has uncommitted changes; refusing to merge")
-        run(["git", "-C", r["repo"], "checkout", into])
+            raise RuntimeError("source repo has uncommitted changes; refusing to merge")
+        p = run(["git", "-C", r["repo"], "checkout", into], check=False)
+        if p.returncode != 0:
+            raise RuntimeError(f"checkout {into} failed: {p.stderr.strip() or p.stdout.strip()}")
         p = run(["git", "-C", r["repo"], "merge", "--no-ff", branch], check=False)
         if p.returncode != 0:
-            die(f"merge failed: {p.stderr.strip() or p.stdout.strip()}")
-        print(f"merged {branch} into {into}")
+            run(["git", "-C", r["repo"], "merge", "--abort"], check=False)
+            raise RuntimeError(f"merge failed: {p.stderr.strip() or p.stdout.strip()}")
+        msg = f"merged {branch} into {into}"
+        conn.execute("UPDATE threads SET status='landed', landed_at=? WHERE id=?", (now(), r["id"]))
     elif strategy == "hook":
         hook = HOME / ".config" / "herdr-thread" / "land.sh"
         if not hook.exists():
-            die(f"land hook not found: {hook}")
+            raise RuntimeError(f"land hook not found: {hook}")
         env = os.environ.copy()
         env.update({
             "THREAD_ID": r["id"], "THREAD_LABEL": r["label"],
@@ -610,21 +736,78 @@ def cmd_land(args):
         })
         p = subprocess.run([str(hook)], cwd=wt, env=env)
         if p.returncode != 0:
-            die(f"land hook failed ({p.returncode})")
-        print(f"land hook completed: {hook}")
+            raise RuntimeError(f"land hook failed ({p.returncode})")
+        msg = f"land hook completed: {hook}"
+        conn.execute("UPDATE threads SET status='landed', landed_at=? WHERE id=?", (now(), r["id"]))
     else:
-        die(f"unknown land strategy: {strategy}")
+        raise RuntimeError(f"unknown land strategy: {strategy}")
 
-    conn.execute("UPDATE threads SET status='landed', landed_at=? WHERE id=?", (now(), r["id"]))
     conn.commit()
-    event(conn, r["id"], "landed", strategy)
+    event(conn, r["id"], "landed", f"{strategy}: {msg}")
     if cfg.get("notify", True):
         try:
-            herdr("notification", "show", f"Landed: {r['label']}", "--body", f"{branch} ({strategy})", "--sound", "done")
+            herdr("notification", "show", f"Landed: {r['label']}",
+                  "--body", f"{branch} ({strategy})", "--sound", "done")
         except Exception:
             pass
     if args.cleanup:
+        r = conn.execute("SELECT * FROM threads WHERE id=?", (r["id"],)).fetchone()
         cleanup_thread(conn, r, force=True)
+    return msg
+
+
+def _land_rows(conn, args):
+    if getattr(args, "id", None):
+        return [thread_row(conn, x) for x in args.id]
+    conds = ["archived = 0", "status NOT IN ('landed','cleaned')"]
+    params = []
+    if getattr(args, "tag", None):
+        conds.append("tags LIKE ?")
+        params.append(f"%{args.tag}%")
+    if not getattr(args, "all", False) and not getattr(args, "tag", None):
+        die("land needs thread id(s), --all, or --tag")
+    rows = conn.execute(
+        "SELECT * FROM threads WHERE " + " AND ".join(conds) + " ORDER BY created_at",
+        params,
+    ).fetchall()
+    return rows
+
+
+def cmd_land(args):
+    cfg = load_config()
+    conn = db()
+    rows = _land_rows(conn, args)
+    if not rows:
+        print("no threads to land")
+        return
+    strategy = args.strategy or cfg["land_strategy"]
+    if args.into is None and strategy == "merge":
+        die("--strategy merge requires --into <branch>")
+    if len(rows) > 1 and not args.yes and not args.dry_run:
+        print("batch land plan:")
+        for r in rows:
+            print(f"  {r['id']}  {r['label'][:30]:30}  {r['branch']}  via {strategy}")
+        die("refusing batch land without --yes (or use --dry-run)")
+
+    ok, failed = 0, 0
+    for r in rows:
+        if args.dry_run:
+            print(f"would land {r['id']}  {r['branch']}  via {strategy}")
+            continue
+        try:
+            msg = _land_one(cfg, conn, r, args)
+            print(f"{r['id']}: {msg}")
+            ok += 1
+        except Exception as e:
+            failed += 1
+            print(f"{r['id']}: FAILED {e}", file=sys.stderr)
+            if not args.continue_on_error:
+                print(f"stopped after failure; {len(rows) - ok - failed} not attempted", file=sys.stderr)
+                break
+    if not args.dry_run:
+        print(f"land summary: ok={ok} failed={failed}")
+    if failed:
+        raise SystemExit(1)
 
 
 def cleanup_thread(conn, r, force=False):
@@ -639,7 +822,8 @@ def cleanup_thread(conn, r, force=False):
     if not ok:
         p = run(["git", "-C", r["repo"], "worktree", "remove", "--force", r["worktree"]], check=False)
         ok = p.returncode == 0
-    conn.execute("UPDATE threads SET status='cleaned', archived=1 WHERE id=?", (r["id"],))
+    keep = r["status"] if r["status"] in ("landed", "pr_open", "closed") else "cleaned"
+    conn.execute("UPDATE threads SET status=?, archived=1 WHERE id=?", (keep, r["id"]))
     conn.commit()
     event(conn, r["id"], "cleaned", "worktree removed" if ok else "worktree remove failed")
     print(f"cleaned {r['id']}  {'(worktree removed)' if ok else '(worktree may remain)'}")
@@ -698,7 +882,12 @@ def cmd_sync(args):
     cfg = load_config()
     conn = db()
     states = agent_states()
-    rows = conn.execute("SELECT * FROM threads WHERE archived=0").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM threads WHERE archived=0 "
+        "OR (pr_url IS NOT NULL AND COALESCE(pr_state,'') NOT IN ('MERGED','CLOSED'))"
+    ).fetchall()
+    results = []
+    polled = 0
     for r in rows:
         a = states.get(r["pane_id"] or "", {})
         astate = a.get("agent_status")
@@ -722,10 +911,19 @@ def cmd_sync(args):
                           "--body", f"{r['branch']} · dirty={info['dirty']}", "--sound", "request")
                 except Exception:
                     pass
-        if args.json:
-            pass
+        if args.pr and r["pr_url"]:
+            try:
+                if update_pr(conn, cfg, r, gh_pr_view(r["pr_url"], r["repo"])):
+                    polled += 1
+            except Exception as e:
+                print(f"{r['id']}: PR poll failed: {e}", file=sys.stderr)
+        r2 = conn.execute("SELECT * FROM threads WHERE id=?", (r["id"],)).fetchone()
+        results.append({**dict(r2), "git": info, "agent_state": astate})
     conn.commit()
-    print(f"synced {len(rows)} threads")
+    if args.json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+    print(f"synced {len(rows)} threads" + (f", PR changes={polled}" if args.pr else ""))
 
 
 def cmd_fork(args):
@@ -871,13 +1069,18 @@ def build_parser():
     c.add_argument("-m", "--message")
     c.set_defaults(func=cmd_checkpoint)
 
-    ld = sub.add_parser("land", help="push / open PR / merge")
-    ld.add_argument("id")
+    ld = sub.add_parser("land", help="push / open PR / merge (supports batch)")
+    ld.add_argument("id", nargs="*")
+    ld.add_argument("--all", action="store_true")
+    ld.add_argument("--tag")
     ld.add_argument("--strategy", choices=["push", "pr", "merge", "hook"])
     ld.add_argument("--into")
     ld.add_argument("--title")
     ld.add_argument("--body")
     ld.add_argument("--cleanup", action="store_true")
+    ld.add_argument("--yes", action="store_true", help="confirm batch land")
+    ld.add_argument("--dry-run", action="store_true")
+    ld.add_argument("--continue-on-error", action="store_true")
     ld.set_defaults(func=cmd_land)
 
     cl = sub.add_parser("cleanup", help="remove the worktree / workspace")
@@ -901,10 +1104,19 @@ def build_parser():
     t.add_argument("--archive", type=lambda x: x.lower() != "false", nargs="?", const=True)
     t.set_defaults(func=cmd_tag)
 
-    sy = sub.add_parser("sync", help="refresh thread states, optionally rebase")
+    sy = sub.add_parser("sync", help="refresh thread states, optionally rebase / poll PRs")
     sy.add_argument("--rebase", action="store_true")
+    sy.add_argument("--pr", action="store_true", help="poll GitHub PR/CI state")
     sy.add_argument("--json", action="store_true")
     sy.set_defaults(func=cmd_sync)
+
+    prp = sub.add_parser("pr", help="show / watch PR and CI state")
+    prp.add_argument("id")
+    prp.add_argument("--watch", action="store_true")
+    prp.add_argument("--interval", type=int, default=30)
+    prp.add_argument("--timeout", type=int, default=3600)
+    prp.add_argument("--json", action="store_true")
+    prp.set_defaults(func=cmd_pr)
 
     f = sub.add_parser("fork", help="fork a thread from its current HEAD")
     f.add_argument("id")

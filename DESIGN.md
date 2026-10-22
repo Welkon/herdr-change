@@ -199,7 +199,7 @@ prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏�
 
 - **P0（已完成）**：`new/list/show/diff/prompt/review/checkpoint/land/cleanup/open` + DB + 配置。
 - **P1（已完成）**：`fork/subagent/sync --rebase/tag/archive`、状态轮询 + 通知、`.agents/prepare|setup` 钩子。
-- **P2（部分完成）**：review verdict 持久化 + `review --reviewer` 已完成；批量 land、PR/CI 状态轮询待做。
+- **P2（已完成）**：review verdict 持久化、`review --reviewer`、批量 land、PR/CI 状态轮询。
 - **P3（部分完成）**：`machines/remote/notify` 透传与 RUNNER.md 已完成；临时 runner 目前是脚本化流程，未做托管。
 
 ---
@@ -218,13 +218,16 @@ prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏�
 已落地命令：
 
 ```
-new  list  show  setup  prompt  review  checkpoint  land  cleanup
+new  list  show  setup  prompt  review  checkpoint  land  pr  cleanup
 open  diff  tag  sync  fork  subagent  machines  remote  notify  doctor
 ```
 
 已验证：
 
 - dummy repo：`new → reviewr → agent → prompt → sync → checkpoint → review --reviewer → land merge → cleanup`；
+- 批量 land：`land --all --strategy push --yes --cleanup`，两个分支都推到 bare remote；
+- PR/CI：fake `gh` 下 `land pr → sync --pr → MERGED`，`pr_state/ci_state` 正确迁移；
+- `land --strategy hook` 环境变量（THREAD_ID/BRANCH/WORKTREE）验证通过。
 - `.agents/prepare` + `.agents/setup` 在新 worktree 内执行；
 - `QP-GD26-0901`：`new --no-agent` 创建/清理后 `git worktree list` 无残留。
 

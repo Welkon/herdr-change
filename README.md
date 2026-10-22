@@ -47,6 +47,17 @@ herdr-thread land <id> --strategy pr            # gh pr create
 herdr-thread land <id> --strategy merge --into main
 herdr-thread land <id> --strategy hook          # 执行 ~/.config/herdr-thread/land.sh
 
+# 批量 land（默认先 dry-run 看计划）
+herdr-thread land --all --strategy push --dry-run
+herdr-thread land --all --strategy push --yes --cleanup
+herdr-thread land --tag firmware --strategy merge --into main --yes
+herdr-thread land --all --strategy push --yes --continue-on-error
+
+# PR / CI
+herdr-thread pr <id>                    # 当前 PR 状态
+herdr-thread pr <id> --watch            # 轮询到 merged/closed
+herdr-thread sync --pr                  # 批量刷新所有打开的 PR
+
 # 7. 清理 worktree / workspace
 herdr-thread cleanup <id>
 ```
@@ -90,8 +101,9 @@ thread
 | `prompt` | 给 Agent 发指令（`--wait` 等待状态） |
 | `review` | 聚焦 + 打开 reviewr，记录 verdict；`--reviewer` 起只读审查 agent |
 | `checkpoint` | `git add -A && git commit`，记录 head |
-| `land` | `push` / `pr` / `merge` / `hook` |
-| `sync` | 刷新 agent 状态；`--rebase` 拉上游；状态变化发通知 |
+| `land` | `push` / `pr` / `merge` / `hook`；支持 `--all` / `--tag` 批量，`--dry-run` / `--yes` / `--continue-on-error` |
+| `pr` | 查看 PR 状态；`--watch` 轮询 CI/merge 状态 |
+| `sync` | 刷新 agent 状态；`--rebase` 拉上游；`--pr` 刷新 PR/CI；状态变化发通知 |
 | `fork` | 从父线程当前 HEAD 建子线程 |
 | `subagent` | `--profile worker/scout/reviewer` 子线程 |
 | `open` | 聚焦 workspace |
@@ -138,6 +150,23 @@ prompt = "你是审查子 Agent。只读 diff，按文件列出风险、遗漏�
 ```
 THREAD_ID THREAD_LABEL REPO WORKTREE BRANCH
 ```
+
+## PR / CI 状态
+
+`land --strategy pr` 会 push 分支、`gh pr create`，并把 URL/number 写进 thread。
+之后：
+
+```bash
+herdr-thread pr <id>            # state / ci / mergeable / review
+herdr-thread pr <id> --watch    # 每 30s 轮询，直到 MERGED 或 CLOSED
+herdr-thread sync --pr          # 批量轮询；变化时发通知
+```
+
+状态存于 `threads.pr_state / ci_state / mergeable / last_sync_at`：
+
+- `ci_state`: `none` / `pending` / `success` / `failure`
+- `pr_state`: `OPEN` / `MERGED` / `CLOSED`
+- PR 合并后 `status` 自动变 `landed`，`landed_at` 补齐
 
 ## 与 Delta 的取舍
 
