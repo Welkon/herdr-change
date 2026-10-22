@@ -65,7 +65,7 @@
 
 | # | Delta 功能 | 替代 | 状态 |
 |---|---|---|---|
-| F1 | 自定义 OpenAI/Anthropic 兼容 provider | 配到 codex/claude/pi 的 provider（如 Magpie） | ✅ |
+| F1 | 自定义 provider | 由 codex/claude/pi 自己配置，本项目不管理 | ✅ |
 | F2 | 模型角色 / fallback | profile 配置 `model` + 启动参数；fallback 交给 Agent | 🔵 |
 | F3 | 上下文窗口/推理强度 | Agent 配置 | ✅ |
 
@@ -265,11 +265,10 @@ backup  prune  doctor
 - Land：依赖 `depend` + 拓扑排序、`local` 策略、`--skip-deps`
 - Sync：`--rebase` 与 `--merge` 都先 fetch
 - 子 Agent：`follow` 聚焦/读取
-- 模型：`models`、`provider`（base URL/key/models）
 - Terminal：线程级 list/new/run/close
 - Runner：env/push-env/preview/urls/snapshot/destroy
-- Web/Inbox：`serve` 本地 dashboard、API `/api/threads`
-- CLI：`config`、`delta` 别名、`restore-db`
+- Web/Inbox：`serve` 本地 dashboard、POST 写评论/note、token/TLS
+- CLI：`config`（含嵌套 key）、`delta` 别名、`restore-db`
 - 工程：单元测试 + GitHub Actions、SQLite `user_version=3`
 
 本地等价物：Web/CRDT/托管 runner 用 `serve` + SQLite 单写、review HTML、SSH 脚本替代。
@@ -280,7 +279,9 @@ backup  prune  doctor
 - `comment --import/--export/--from-clipboard`，`comment --send --to` 跨线程
 - `land --json` 纯 JSON（日志在 `log` 字段）
 - `config set`、`delta auth login/logout`、`usage`、`restore-db`
-- provider 环境注入、`new --provider`
 - 写命令文件锁 `write.lock`
-- 多仓 fork/subagent 克隆额外 repo
+- `fork --clone-session` fork pi/codex session；多仓 fork/subagent 克隆额外 repo；`HERDR_THREAD_REPOS` 注入 agent 环境；`repos` 命令
+- 远端镜像：`mirror <machine>` / `remote-threads`
+- PR：GitHub/GitLab/Azure 创建与状态读取
+- 写命令文件锁
 - SQLite `user_version=3`；unit + smoke + GitHub Actions

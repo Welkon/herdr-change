@@ -16,6 +16,7 @@ import shlex
 import shutil
 import signal
 import sqlite3
+import ssl
 import subprocess
 import sys
 import time
@@ -258,18 +259,6 @@ def db() -> sqlite3.Connection:
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS providers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            base_url TEXT NOT NULL DEFAULT '',
-            api_key TEXT NOT NULL DEFAULT '',
-            models TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
         CREATE TABLE IF NOT EXISTS checkpoints (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id TEXT NOT NULL,
@@ -488,21 +477,13 @@ def create_extra_worktree(repo: str, branch: str, base_ref: str, path: str) -> s
     return base_sha
 
 
-def apply_provider(conn, name: str, pane_id: str):
-    row = conn.execute("SELECT * FROM providers WHERE name=?", (name,)).fetchone()
-    if not row:
-        raise RuntimeError(f"unknown provider: {name}")
-    envs = {}
-    if row["base_url"]:
-        envs["OPENAI_BASE_URL"] = row["base_url"]
-    if row["api_key"]:
-        envs["OPENAI_API_KEY"] = row["api_key"]
+def apply_env(pane_id: str, envs: dict):
     if not envs:
         return
-    cmd = "; ".join(f"export {k}={shlex.quote(v)}" for k, v in envs.items())
+    cmd = "; ".join(f"export {k}={shlex.quote(str(v))}" for k, v in envs.items())
     p = subprocess.run(["herdr", "pane", "run", pane_id, cmd], text=True, capture_output=True)
     if p.returncode != 0:
-        raise RuntimeError(f"failed to apply provider env: {p.stderr.strip() or p.stdout.strip()}")
+        raise RuntimeError(f"failed to apply env: {p.stderr.strip() or p.stdout.strip()}")
 
 
 def cmd_new(args):
@@ -575,8 +556,9 @@ def cmd_new(args):
         herdr("worktree", "remove", "--workspace", workspace_id, "--force")
         die(str(e))
 
-    if getattr(args, "provider", None):
-        apply_provider(conn, args.provider, pane_id)
+    repo_map = [{"repo": repo, "worktree": wt, "branch": worktree.get("branch", branch)}]
+    repo_map += [{"repo": x["repo"], "worktree": x["worktree"], "branch": x["branch"]} for x in extra_repos]
+    apply_env(pane_id, {"HERDR_THREAD_REPOS": json.dumps(repo_map, ensure_ascii=False)})
 
     profile = cfg["roles"].get(args.role, {}) if getattr(args, "role", None) else {}
     if not profile:
@@ -586,7 +568,7 @@ def cmd_new(args):
     agent_args: list[str] = []
     if not args.no_agent:
         agent_kind = args.agent or profile.get("kind") or cfg["default_agent"]
-        agent_args = list(profile.get("args") or [])
+        agent_args = list(profile.get("args") or []) + list(getattr(args, "extra_agent_args", []) or [])
         agent_name = f"ht-{tid}"
         start_res = start_agent(agent_name, agent_kind, pane_id, workspace_id, wt, agent_args,
                                 cfg.get("fallback") or [])
@@ -759,6 +741,75 @@ def cmd_show(args):
 PR_FIELDS = "state,isDraft,mergeable,reviewDecision,statusCheckRollup,url,number,title,headRefName,baseRefName"
 
 
+def pr_forge(repo: str) -> str:
+    origin = git(repo, "remote", "get-url", "origin", check=False).lower()
+    if "gitlab" in origin:
+        return "gitlab"
+    if "dev.azure.com" in origin or "visualstudio.com" in origin:
+        return "azure"
+    return "github"
+
+
+def create_pr(rr, title: str, body: str):
+    wt = rr["worktree"]
+    forge = pr_forge(rr["repo"])
+    if forge == "gitlab":
+        p = run(["glab", "mr", "create", "--source-branch", rr["branch"], "--title", title,
+                 "--description", body, "--yes"], cwd=wt, check=False)
+        if p.returncode != 0:
+            raise RuntimeError(f"glab mr create failed: {p.stderr.strip() or p.stdout.strip()}")
+        out = p.stdout.strip()
+        m = re.search(r"https://\S+/merge_requests/(\d+)", out + " " + p.stderr)
+        return (m.group(0) if m else out), (int(m.group(1)) if m else None)
+    if forge == "azure":
+        p = run(["az", "repos", "pr", "create", "--source-branch", rr["branch"], "--title", title,
+                 "--description", body, "--output", "json"], cwd=wt, check=False)
+        if p.returncode != 0:
+            raise RuntimeError(f"az repos pr create failed: {p.stderr.strip() or p.stdout.strip()}")
+        data = json.loads(p.stdout)
+        num = data.get("pullRequestId")
+        base = (data.get("repository") or {}).get("webUrl") or (data.get("repository") or {}).get("url", "")
+        url = base.rstrip("/") + f"/pullrequest/{num}" if base and num else str(num or "")
+        return url, num
+    p = run(["gh", "pr", "create", "--head", rr["branch"], "--title", title, "--body", body],
+            cwd=wt, check=False)
+    if p.returncode != 0:
+        raise RuntimeError(f"gh pr create failed: {p.stderr.strip() or p.stdout.strip()}")
+    out = p.stdout.strip()
+    m = re.search(r"https://\S+/pull/(\d+)", out)
+    return (m.group(0) if m else (out.splitlines()[-1] if out else "")), (int(m.group(1)) if m else None)
+
+
+def view_pr(rr):
+    forge = pr_forge(rr["repo"])
+    if forge == "gitlab":
+        p = run(["glab", "mr", "view", rr["pr_url"], "--output", "json"], cwd=rr["repo"], check=False)
+        if p.returncode != 0:
+            raise RuntimeError(f"glab mr view failed: {p.stderr.strip() or p.stdout.strip()}")
+        d = json.loads(p.stdout)
+        state = {"opened": "OPEN", "merged": "MERGED", "closed": "CLOSED"}.get((d.get("state") or "").lower(), d.get("state", "").upper())
+        mergeable = "MERGEABLE" if d.get("merge_status") in ("can_be_merged", "mergeable") else (d.get("merge_status") or "").upper()
+        pipeline = (d.get("pipeline") or {}).get("status", "")
+        ci = "success" if pipeline == "success" else ("failure" if pipeline == "failed" else ("pending" if pipeline else "none"))
+        return {"state": state, "mergeable": mergeable,
+                "statusCheckRollup": [{"status": "COMPLETED" if ci in ("success", "failure") else "IN_PROGRESS",
+                                       "conclusion": None if ci == "pending" else ci.upper()}] if ci != "none" else []}
+    if forge == "azure":
+        num = rr["pr_number"] or (rr["pr_url"].rstrip("/").split("/")[-1] if rr["pr_url"] else "")
+        p = run(["az", "repos", "pr", "show", "--id", str(num), "--output", "json"], cwd=rr["repo"], check=False)
+        if p.returncode != 0:
+            raise RuntimeError(f"az repos pr show failed: {p.stderr.strip() or p.stdout.strip()}")
+        d = json.loads(p.stdout)
+        state = {"active": "OPEN", "completed": "MERGED", "abandoned": "CLOSED"}.get((d.get("status") or "").lower(), d.get("status", "").upper())
+        mergeable = {"succeeded": "MERGEABLE", "conflicts": "CONFLICTING"}.get((d.get("mergeStatus") or "").lower(), d.get("mergeStatus") or "")
+        build = (d.get("buildStatus") or "").lower()
+        ci = "success" if build in ("succeeded", "success") else ("failure" if build in ("failed", "error") else ("pending" if build in ("inprogress", "notstarted") else "none"))
+        return {"state": state, "mergeable": mergeable,
+                "statusCheckRollup": [{"status": "COMPLETED" if ci in ("success", "failure") else "IN_PROGRESS",
+                                       "conclusion": None if ci == "pending" else ci.upper()}] if ci != "none" else []}
+    return gh_pr_view(rr["pr_url"], rr["repo"])
+
+
 def gh_pr_view(pr_url: str, cwd: str) -> dict:
     p = run(["gh", "pr", "view", pr_url, "--json", PR_FIELDS], cwd=cwd, check=False)
     if p.returncode != 0:
@@ -862,7 +913,7 @@ def cmd_pr(args):
         for rr in repo_rows(conn, r):
             if not rr["pr_url"]:
                 continue
-            data = gh_pr_view(rr["pr_url"], rr["repo"])
+            data = view_pr(rr)
             update_pr_repo(conn, cfg, r, rr, data)
             state = data.get("state")
             last_states[rr["id"]] = state
@@ -1506,14 +1557,7 @@ def _land_one(cfg, conn, r, args) -> str:
             p = run(["git", "-C", rr["worktree"], "push", "-u", "origin", rr["branch"]], check=False)
             if p.returncode != 0:
                 raise RuntimeError(f"{Path(rr['repo']).name}: push failed: {p.stderr.strip() or p.stdout.strip()}")
-            p = run(["gh", "pr", "create", "--head", rr["branch"], "--title", title, "--body", body],
-                    cwd=rr["worktree"], check=False)
-            if p.returncode != 0:
-                raise RuntimeError(f"{Path(rr['repo']).name}: gh pr create failed: {p.stderr.strip() or p.stdout.strip()}")
-            out = p.stdout.strip()
-            m = re.search(r"https://\S+/pull/(\d+)", out)
-            url = m.group(0) if m else (out.splitlines()[-1] if out else "")
-            number = int(m.group(1)) if m else None
+            url, number = create_pr(rr, title, body)
             conn.execute(
                 "UPDATE thread_repos SET pr_url=?, pr_number=?, pr_state='OPEN' WHERE id=?",
                 (url, number, rr["id"]),
@@ -1552,14 +1596,23 @@ def _land_one(cfg, conn, r, args) -> str:
         if not candidates:
             raise RuntimeError("no PR; use land --strategy pr first")
         for rr in candidates:
-            cmd = ["gh", "pr", "merge", rr["pr_url"], f"--{method}"]
-            if args.delete_branch:
-                cmd.append("--delete-branch")
-            if args.auto:
-                cmd.append("--auto")
+            forge = pr_forge(rr["repo"])
+            if forge == "gitlab":
+                cmd = ["glab", "mr", "merge", rr["pr_url"], "--yes"]
+                if args.delete_branch:
+                    cmd.append("--remove-source-branch")
+            elif forge == "azure":
+                cmd = ["az", "repos", "pr", "update", "--id", str(rr["pr_number"] or rr["pr_url"].rstrip("/").split("/")[-1]),
+                       "--status", "completed"]
+            else:
+                cmd = ["gh", "pr", "merge", rr["pr_url"], f"--{method}"]
+                if args.delete_branch:
+                    cmd.append("--delete-branch")
+                if args.auto:
+                    cmd.append("--auto")
             p = run(cmd, cwd=rr["worktree"], check=False)
             if p.returncode != 0:
-                raise RuntimeError(f"{Path(rr['repo']).name}: gh pr merge failed: {p.stderr.strip() or p.stdout.strip()}")
+                raise RuntimeError(f"{Path(rr['repo']).name}: PR merge failed: {p.stderr.strip() or p.stdout.strip()}")
             if not args.auto:
                 conn.execute("UPDATE thread_repos SET pr_state='MERGED' WHERE id=?", (rr["id"],))
             messages.append(f"{Path(rr['repo']).name}: PR {'auto-merge enabled' if args.auto else 'merged'}")
@@ -1986,7 +2039,7 @@ def cmd_sync(args):
                 if not rr["pr_url"]:
                     continue
                 try:
-                    if update_pr_repo(conn, cfg, r, rr, gh_pr_view(rr["pr_url"], rr["repo"])):
+                    if update_pr_repo(conn, cfg, r, rr, view_pr(rr)):
                         polled += 1
                 except Exception as e:
                     print(f"{r['id']} {Path(rr['repo']).name}: PR poll failed: {e}", file=sys.stderr)
@@ -2153,11 +2206,25 @@ def cmd_fork(args):
     conn = db()
     parent = thread_row(conn, args.id)
     base = git(parent["worktree"], "rev-parse", "HEAD", check=False)
+    extra_args = []
+    if args.clone_session:
+        agents = agent_states()
+        a = agents.get(parent["pane_id"] or "", {})
+        sess = a.get("agent_session") or {}
+        kind = (a.get("agent") or parent["agent_kind"] or "").lower()
+        val = sess.get("value")
+        if kind == "pi" and val:
+            extra_args = ["--fork", val]
+        elif kind == "codex" and val:
+            extra_args = ["resume", val]
+        else:
+            print(f"warning: no cloneable session for {kind or 'unknown'}; falling back to context file", file=sys.stderr)
     ns = argparse.Namespace(
         label=args.label, repo=parent["repo"], base=base, branch=None, worktree=None,
         agent=args.agent or parent["agent_kind"], no_agent=args.no_agent,
         prompt=args.prompt, focus=args.focus, tag=None, parent=parent["id"],
         trust_repository=False, profile=None, run_hooks=False,
+        extra_agent_args=extra_args,
     )
     tid = cmd_new(ns)
     cfg = load_config()
@@ -2238,7 +2305,7 @@ def cmd_subagent(args):
         branch=None, worktree=None,
         agent=kind, no_agent=False, prompt=prompt, focus=args.focus,
         tag=f"subagent,{args.profile}", parent=parent["id"], trust_repository=False,
-        profile=None, run_hooks=False,
+        profile=None, run_hooks=False, extra_agent_args=[],
     )
     tid = cmd_new(ns)
     child = thread_row(conn, tid)
@@ -2356,102 +2423,15 @@ def cmd_usage(args):
         print(f"turns={turns} comments={comments} checkpoints={checkpoints} prs={prs} db={data['db_bytes']} bytes")
 
 
-def cmd_models(args):
-    cfg = load_config()
-    print("roles:")
-    for name, spec in (cfg.get("roles") or {}).items():
-        print(f"  {name:14} kind={spec.get('kind','?')} args={spec.get('args',[])}")
-    print("profiles:")
-    for name, spec in (cfg.get("profiles") or {}).items():
-        print(f"  {name:14} kind={spec.get('kind','?')} args={spec.get('args',[])}")
-    print(f"fallback: {cfg.get('fallback') or []}")
+def cmd_repos(args):
     conn = db()
-    rows = conn.execute("SELECT name,base_url,models FROM providers ORDER BY name").fetchall()
-    print("providers:")
+    r = thread_row(conn, args.id)
+    rows = repo_rows(conn, r)
+    if args.json:
+        print(json.dumps([dict(x) for x in rows], ensure_ascii=False, indent=2))
+        return
     for x in rows:
-        print(f"  {x['name']:14} {x['base_url'] or '-'} models={x['models'] or '-'}")
-    if not rows:
-        print("  (none)")
-
-
-def cmd_provider(args):
-    conn = db()
-    if args.action == "list":
-        rows = conn.execute("SELECT * FROM providers ORDER BY name").fetchall()
-        for x in rows:
-            key = (x["api_key"][:4] + "…" + x["api_key"][-4:]) if len(x["api_key"]) > 8 else ("set" if x["api_key"] else "-")
-            print(f"{x['name']:14} {x['base_url'] or '-':40} key={key} models={x['models'] or '-'}")
-        if not rows:
-            print("no providers")
-        return
-    if args.action == "remove":
-        conn.execute("DELETE FROM providers WHERE name=?", (args.name,))
-        conn.commit()
-        print(f"removed provider {args.name}")
-        return
-    if not args.name:
-        die("provider add requires a name")
-    conn.execute(
-        "INSERT INTO providers(name,base_url,api_key,models,created_at) VALUES(?,?,?,?,?) "
-        "ON CONFLICT(name) DO UPDATE SET base_url=excluded.base_url,api_key=excluded.api_key,models=excluded.models",
-        (args.name, args.base_url or "", args.api_key or "", args.models or "", now()),
-    )
-    conn.commit()
-    print(f"saved provider {args.name}")
-
-
-def cmd_terminal(args):
-    conn = db()
-    if args.action == "list":
-        conds, params = [], []
-        if args.id:
-            r = thread_row(conn, args.id)
-            conds.append("thread_id=?")
-            params.append(r["id"])
-        q = "SELECT * FROM terminals" + (" WHERE " + " AND ".join(conds) if conds else "") + " ORDER BY id"
-        for x in conn.execute(q, params).fetchall():
-            print(f"[{x['id']}] {x['thread_id']}  {x['label']:16} {x['status']:6} {x['pane_id']}")
-        return
-    if args.action == "new":
-        r = thread_row(conn, args.id)
-        split = herdr("pane", "split", r["pane_id"], "--direction", args.direction,
-                      "--cwd", r["worktree"], "--no-focus")
-        pane = split.get("pane", {}).get("pane_id")
-        if not pane:
-            die(f"unexpected split result: {split}")
-        cur = conn.execute(
-            "INSERT INTO terminals(thread_id,label,pane_id,status,created_at) VALUES(?,?,?,'open',?)",
-            (r["id"], args.label or f"term-{int(time.time())}", pane, now()),
-        )
-        conn.commit()
-        print(f"terminal {cur.lastrowid}  {pane}")
-        return
-    if args.action == "run":
-        if not args.id:
-            die("terminal run requires id")
-        row = conn.execute("SELECT * FROM terminals WHERE id=?", (int(args.id),)).fetchone()
-        if not row:
-            die(f"terminal not found: {args.id}")
-        if not args.command:
-            die("terminal run requires a command")
-        p = subprocess.run(["herdr", "pane", "run", row["pane_id"], args.command], text=True, capture_output=True)
-        if p.returncode != 0:
-            die(f"pane run failed: {p.stderr.strip() or p.stdout.strip()}")
-        print(f"ran in {row['pane_id']}")
-        return
-    if args.action == "close":
-        if not args.id:
-            die("terminal close requires id")
-        row = conn.execute("SELECT * FROM terminals WHERE id=?", (int(args.id),)).fetchone()
-        if not row:
-            die(f"terminal not found: {args.id}")
-        try:
-            herdr("pane", "close", row["pane_id"])
-        except Exception as e:
-            print(f"warning: pane close failed: {e}", file=sys.stderr)
-        conn.execute("UPDATE terminals SET status='closed' WHERE id=?", (row["id"],))
-        conn.commit()
-        print(f"closed terminal {row['id']}")
+        print(f"{'*' if x['primary_repo'] else ' '} {Path(x['repo']).name:16} {x['branch']:40} {x['worktree']}")
 
 
 def cmd_runner(args):
@@ -2657,6 +2637,58 @@ def cmd_share(args):
         print(f"wrote {out}")
 
 
+def cmd_mirror(args):
+    host = args.host
+    if not host:
+        p = subprocess.run(["herdr", "machine", "list", "--json"], text=True, capture_output=True)
+        try:
+            machines = json.loads(p.stdout or "[]")
+        except json.JSONDecodeError:
+            machines = []
+        row = next((m for m in machines if m.get("id") == args.machine or m.get("label") == args.machine), None)
+        if row:
+            host = row.get("host") or row.get("ssh_target") or row.get("target") or row.get("label")
+    if not host:
+        die(f"cannot resolve host for {args.machine}; pass --host user@host")
+    remote_cmd = args.remote_command or "herdr-thread list --json"
+    p = subprocess.run(["ssh", host, remote_cmd], text=True, capture_output=True)
+    if p.returncode != 0:
+        die(f"remote list failed: {p.stderr.strip() or p.stdout.strip()}")
+    try:
+        rows = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        die(f"remote returned non-JSON: {p.stdout[:200]}")
+    conn = db()
+    for x in rows:
+        conn.execute(
+            "INSERT INTO remote_threads(machine,id,label,status,repo,branch,data,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(machine,id) DO UPDATE SET "
+            "label=excluded.label,status=excluded.status,repo=excluded.repo,branch=excluded.branch,"
+            "data=excluded.data,updated_at=excluded.updated_at",
+            (args.machine, x.get("id", ""), x.get("label", ""), x.get("status", ""),
+             x.get("repo", ""), x.get("branch", ""), json.dumps(x, ensure_ascii=False), now()),
+        )
+    conn.commit()
+    print(f"mirrored {len(rows)} threads from {args.machine} ({host})")
+
+
+def cmd_remote_threads(args):
+    conn = db()
+    conds, params = [], []
+    if args.machine:
+        conds.append("machine=?")
+        params.append(args.machine)
+    q = "SELECT * FROM remote_threads" + (" WHERE " + " AND ".join(conds) if conds else "") + " ORDER BY machine,label"
+    rows = conn.execute(q, params).fetchall()
+    if args.json:
+        print(json.dumps([dict(x) for x in rows], ensure_ascii=False, indent=2))
+        return
+    for x in rows:
+        print(f"{x['machine']:12} {x['id']:10} {x['label'][:24]:24} {x['status']:10} {x['branch']}")
+    if not rows:
+        print("no mirrored threads")
+
+
 def cmd_machines(args):
     p = subprocess.run(["herdr", "machine", "list", "--json"], text=True, capture_output=True)
     raw = (p.stdout or "").strip()
@@ -2761,8 +2793,24 @@ def cmd_config(args):
             line = f"{args.key} = {val}"
         else:
             line = f"{args.key} = " + json.dumps(val)
-        pat = re.compile(rf"^{re.escape(args.key)}\s*=.*$", re.M)
-        text = pat.sub(line, text) if pat.search(text) else text.rstrip() + "\n" + line + "\n"
+        if "." in args.key:
+            section, leaf = args.key.rsplit(".", 1)
+            sec_pat = re.compile(rf"^\[{re.escape(section)}\]\s*$", re.M)
+            m = sec_pat.search(text)
+            line = f"{leaf} = {val if val.startswith(('[', '{')) or val.lower() in ('true','false') or re.fullmatch(r'-?\d+', val) else json.dumps(val)}"
+            if m:
+                start = m.end()
+                nxt = re.search(r"^\[", text[start:], re.M)
+                end = start + nxt.start() if nxt else len(text)
+                block = text[start:end]
+                lp = re.compile(rf"^{re.escape(leaf)}\s*=.*$", re.M)
+                block = lp.sub(line, block) if lp.search(block) else block.rstrip() + "\n" + line + "\n"
+                text = text[:start] + block + text[end:]
+            else:
+                text = text.rstrip() + f"\n\n[{section}]\n{line}\n"
+        else:
+            pat = re.compile(rf"^{re.escape(args.key)}\s*=.*$", re.M)
+            text = pat.sub(line, text) if pat.search(text) else text.rstrip() + "\n" + line + "\n"
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(text)
         print(f"{CONFIG_PATH}: {line}")
@@ -2964,7 +3012,13 @@ def cmd_serve(args):
             pass
 
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"serving http://{args.host}:{args.port}")
+    if args.tls_cert and args.tls_key:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(args.tls_cert, args.tls_key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        print(f"serving https://{args.host}:{args.port}")
+    else:
+        print(f"serving http://{args.host}:{args.port}")
     srv.serve_forever()
 
 
@@ -3025,7 +3079,6 @@ def build_parser():
     n.add_argument("--agent", help="agent kind (codex/claude/pi/...)")
     n.add_argument("--profile", help="profile name from config.toml")
     n.add_argument("--role", help="model role from config.toml [roles.*]")
-    n.add_argument("--provider", help="provider name from `provider add`")
     n.add_argument("--no-agent", action="store_true")
     n.add_argument("--prompt")
     n.add_argument("--tag")
@@ -3276,6 +3329,7 @@ def build_parser():
     f.add_argument("--prompt")
     f.add_argument("--with-context", "--conversation", dest="with_context", action="store_true")
     f.add_argument("--from-turn", type=int)
+    f.add_argument("--clone-session", action="store_true", help="fork pi/codex agent session when possible")
     f.add_argument("--focus", action="store_true")
     f.set_defaults(func=cmd_fork)
 
@@ -3318,24 +3372,10 @@ def build_parser():
     us.add_argument("--json", action="store_true")
     us.set_defaults(func=cmd_usage)
 
-    md = sub.add_parser("models", help="list roles/profiles/providers")
-    md.set_defaults(func=cmd_models)
-
-    pv = sub.add_parser("provider", help="manage model providers")
-    pv.add_argument("action", choices=["list", "add", "remove"])
-    pv.add_argument("name", nargs="?")
-    pv.add_argument("--base-url")
-    pv.add_argument("--api-key")
-    pv.add_argument("--models")
-    pv.set_defaults(func=cmd_provider)
-
-    tm = sub.add_parser("terminal", help="thread-scoped terminals")
-    tm.add_argument("action", choices=["list", "new", "run", "close"])
-    tm.add_argument("id", nargs="?")
-    tm.add_argument("--label")
-    tm.add_argument("--direction", choices=["right", "down"], default="down")
-    tm.add_argument("--command")
-    tm.set_defaults(func=cmd_terminal)
+    rp = sub.add_parser("repos", help="list repositories/worktrees in a thread")
+    rp.add_argument("id")
+    rp.add_argument("--json", action="store_true")
+    rp.set_defaults(func=cmd_repos)
 
     rn = sub.add_parser("runner", help="remote/cloud runner lifecycle")
     rn.add_argument("action", choices=["list", "add", "up", "down", "destroy", "bootstrap",
@@ -3358,6 +3398,17 @@ def build_parser():
     sh.add_argument("--review", action="store_true", help="write a standalone review HTML bundle")
     sh.add_argument("--html", action="store_true")
     sh.set_defaults(func=cmd_share)
+
+    mi = sub.add_parser("mirror", help="mirror remote herdr-thread list into local DB")
+    mi.add_argument("machine")
+    mi.add_argument("--host")
+    mi.add_argument("--remote-command", default="herdr-thread list --json")
+    mi.set_defaults(func=cmd_mirror)
+
+    rth = sub.add_parser("remote-threads", help="show mirrored remote threads")
+    rth.add_argument("machine", nargs="?")
+    rth.add_argument("--json", action="store_true")
+    rth.set_defaults(func=cmd_remote_threads)
 
     m = sub.add_parser("machines", help="list saved herdr SSH machines")
     m.add_argument("--json", action="store_true")
@@ -3402,6 +3453,8 @@ def build_parser():
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--token")
+    sv.add_argument("--tls-cert")
+    sv.add_argument("--tls-key")
     sv.add_argument("--daemon", action="store_true")
     sv.add_argument("--stop", action="store_true")
     sv.add_argument("--status", action="store_true")

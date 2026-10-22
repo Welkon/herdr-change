@@ -76,7 +76,8 @@ herdr-thread rename <id> "new label"
 herdr-thread delete <id> --keep-worktree
 herdr-thread guide <id>                 # review guide markdown
 herdr-thread share <id> --review        # 独立 review HTML
-herdr-thread serve --daemon --token secret   # http://127.0.0.1:8765
+herdr-thread serve --daemon --token secret              # http://127.0.0.1:8765
+herdr-thread serve --tls-cert cert.pem --tls-key key.pem # https
 
 # 9. 清理 / 恢复
 herdr-thread cleanup <id>
@@ -104,7 +105,7 @@ thread
 |---|---|
 | `new` | 建 worktree/workspace/agent/reviewr；`--repo` 可重复；`--profile/--role/--run-hooks` |
 | `list` | 状态总览；`--tag --search --bookmarked --all --json` |
-| `show` | 线程详情、repos、checkpoints、PR；`--json` |
+| `show` / `repos` | 线程详情 / 多仓路径列表；`--json` |
 | `diff` | 所有 repo 的 `base..HEAD` + 未提交 diff |
 | `setup` | 在 worktree 跑 `.agents/prepare` / `.agents/setup` |
 | `prompt` | 给 Agent 发指令；`--wait` |
@@ -125,18 +126,17 @@ thread
 | `depend` | 线程依赖；`land` 会检查/拓扑排序 |
 | `check-remote` | 对比本地 branch 与 origin |
 | `subagent follow` | `follow <parent> <sub>` 聚焦并读子 Agent |
-| `models` / `provider` | 角色、profile、fallback、provider 管理 |
 | `terminal` | 线程级终端 list/new/run/close |
-| `serve` | 本地 Web dashboard / inbox；POST 写评论/note；`--token` |
-| `config` | 显示有效配置/路径 |
+| `serve` | 本地 Web dashboard / inbox；POST 写评论/note；`--token` / `--tls-cert` / `--tls-key` |
+| `config` | show/path/set，支持 `roles.foo.kind` 这类嵌套 key |
 | `delta` | 别名：open/thread/worktree/auth(login/logout/status)/integration |
 | `restore-db` | 从 backup 恢复 threads.db |
 | `checkpoint` | 提交 / `--list` / `--restore`，每个 repo 单独记录 |
 | `land` | `push/pr/merge/merge-pr/local/hook`；批量 `--all/--tag`；dirty/verdict/pre-land/deps gate |
-| `pr` | 查看 / `--watch` PR + CI |
+| `pr` | 查看 / `--watch` PR + CI；GitHub/GitLab/Azure（需 gh/glab/az） |
 | `sync` | 刷新 agent 状态；`--rebase`（先 fetch）；`--pr` |
 | `watch` | 后台轮询；`--daemon/--status/--stop` |
-| `fork` | 从当前 HEAD 建子线程；`--with-context/--from-turn` 注入父 transcript |
+| `fork` | 从当前 HEAD 建子线程；`--with-context/--from-turn` 注入 transcript；`--clone-session` fork pi/codex session |
 | `subagent` | 独立线程或 `--in-place` 同 worktree 子 Agent；`--list` |
 | `join` | 收集子 Agent 输出并回传父 Agent |
 | `open` | 聚焦 workspace |
@@ -145,6 +145,7 @@ thread
 | `recover` | 重新绑定 workspace/pane/agent；`--create/--start/--prune` |
 | `machines` | 列出 herdr SSH machines |
 | `remote` | 透传远端命令：`remote mini agent list` |
+| `mirror` / `remote-threads` | 拉取远端 herdr-thread 列表到本地 DB 并查看 |
 | `runner` | add/up/down/destroy/bootstrap/forward/preview/unforward/urls/env/push-env/snapshot |
 | `share` | 打印远程 attach / 协作说明 |
 | `notify` | 桌面通知 |
@@ -174,7 +175,7 @@ herdr-thread new "跨仓" --repo ~/fw --repo ~/host
 - 第一个 repo 由 herdr 建 workspace；其余用 `git worktree add`
 - `checkpoint/diff/land/cleanup` 遍历全部 repo
 - `thread_repos` 保存每个 repo 的 branch、base、PR、CI
-- `land --strategy pr` 每个 repo 各开一个 PR
+- `land --strategy pr` 每个 repo 各开一个 PR（按 origin 自动选 gh/glab/az）
 
 ## 子 Agent
 
