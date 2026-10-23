@@ -11,7 +11,7 @@ title = "new task"
 placement = "popup"
 width = "52%"
 height = "46%"
-command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/task.sh\""]
+command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-/home/felix/herdr-thread/herdr-plugin}/task.sh\""]
 
 [[panes]]
 id = "done"
@@ -19,7 +19,7 @@ title = "finish thread"
 placement = "popup"
 width = "52%"
 height = "50%"
-command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/done.sh\""]
+command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-/home/felix/herdr-thread/herdr-plugin}/done.sh\""]
 
 [[actions]]
 id = "task"
