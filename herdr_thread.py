@@ -115,6 +115,7 @@ def db() -> sqlite3.Connection:
             reviewer_agent TEXT,
             agent_name TEXT,
             agent_kind TEXT,
+            emb_task TEXT,
             status TEXT NOT NULL DEFAULT 'created',
             review_state TEXT NOT NULL DEFAULT '',
             tags TEXT NOT NULL DEFAULT '',
@@ -129,7 +130,7 @@ def db() -> sqlite3.Connection:
     )
     cols = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
     for col in ("reviewer_pane_id", "reviewer_agent", "pr_url", "pr_state", "ci_state",
-                "mergeable", "last_sync_at", "base_sha"):
+                "mergeable", "last_sync_at", "base_sha", "emb_task"):
         if col not in cols:
             conn.execute(f"ALTER TABLE threads ADD COLUMN {col} TEXT")
     if "pr_number" not in cols:
@@ -437,6 +438,8 @@ def status_line(row, states: dict, info: dict) -> str:
     if info["behind"] and info["behind"] != "0":
         flags.append(f"behind:{info['behind']}")
     rev = f" review:{row['review_state']}" if row["review_state"] else ""
+    if row["emb_task"]:
+        flags.append("emb")
     if row["pr_url"]:
         flags.append(f"pr:{row['pr_state'] or '?'}/{row['ci_state'] or '-'}")
     flags_s = " ".join(flags)
@@ -785,6 +788,8 @@ def cmd_show(args):
     print(f"  workspace   {r['workspace_id']}  agent_pane={r['pane_id']}  reviewr={r['review_pane_id'] or '-'}")
     if r["reviewer_agent"]:
         print(f"  reviewer    {r['reviewer_agent']} ({r['reviewer_pane_id'] or '-'})")
+    if r["emb_task"]:
+        print(f"  emb task    {r['emb_task']}")
     if r["pr_url"]:
         print(f"  pr          {r['pr_url']}  state={r['pr_state'] or '-'} ci={r['ci_state'] or '-'} mergeable={r['mergeable'] or '-'}")
     print(f"  git         head={info['head']} dirty={info['dirty']} ahead={info['ahead'] or '-'} behind={info['behind'] or '-'}")
@@ -1887,6 +1892,11 @@ def cmd_land(args):
 def cleanup_thread(conn, r, force=False):
     ws = r["workspace_id"]
     ok = True
+    if r["emb_task"]:
+        p = run(["emb-agent", "task", "worktree", "cleanup", r["emb_task"], "--cwd", r["repo"]], check=False)
+        if p.returncode != 0:
+            print(f"warning: emb worktree cleanup failed: {p.stderr.strip() or p.stdout.strip()}", file=sys.stderr)
+            ok = False
     repos = repo_rows(conn, r)
     if ws:
         try:
@@ -1982,6 +1992,132 @@ def cmd_done_here(args):
         die(f"no herdr-thread for cwd: {path}")
     cmd_done(argparse.Namespace(id=r["id"], strategy=None, into=None, pr=args.pr,
                                 cleanup=args.cleanup, delete_branch=False, message=None))
+
+
+def _open_existing_workspace(repo: str, path: str, label: str):
+    try:
+        res = herdr("worktree", "open", "--cwd", repo, "--path", path, "--label", label, "--no-focus")
+    except Exception:
+        res = herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
+    ws = res.get("workspace", {})
+    root = res.get("root_pane", {})
+    ws_id = ws.get("workspace_id") or root.get("workspace_id")
+    pane_id = root.get("pane_id")
+    if not ws_id:
+        raise RuntimeError(f"unexpected workspace result: {res}")
+    return ws_id, pane_id
+
+
+def cmd_adopt(args):
+    cfg = load_config()
+    conn = db()
+    repo = str(Path(args.repo).resolve())
+    path = str(Path(args.path).resolve())
+    if not is_git_repo(repo):
+        die(f"not a git repository: {repo}")
+    if not Path(path).exists():
+        die(f"worktree missing: {path}")
+    branch = git(path, "rev-parse", "--abbrev-ref", "HEAD", check=False) or args.branch or ""
+    base_branch = args.base or "main"
+    base_sha = git(path, "merge-base", base_branch, "HEAD", check=False)
+    ws_id, pane_id = _open_existing_workspace(repo, path, args.label or Path(path).name)
+    if not pane_id:
+        panes = pane_list(ws_id)
+        pane_id = panes[0]["pane_id"] if panes else None
+    agent_name = None
+    agent_kind = None
+    if pane_id and not args.no_agent:
+        agent_kind = args.agent or cfg["default_agent"]
+        agent_name = f"ht-{new_id()}"
+        start_agent(agent_name, agent_kind, pane_id, ws_id, path, fallbacks=cfg.get("fallback") or [])
+    review_pane = find_review_pane(ws_id)
+    tid = new_id()
+    conn.execute(
+        """INSERT INTO threads
+           (id,parent_id,label,repo,worktree,branch,base_ref,base_sha,workspace_id,pane_id,
+            review_pane_id,agent_name,agent_kind,emb_task,status,review_state,tags,
+            bookmarked,archived,created_at,head_sha,meta)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','emb',0,0,?,?, '{}')""",
+        (tid, args.parent, args.label or Path(path).name, repo, path, branch, base_branch, base_sha,
+         ws_id, pane_id, review_pane, agent_name, agent_kind, args.emb_task,
+         "working" if agent_name else "created", now(), git(path, "rev-parse", "--short", "HEAD", check=False)),
+    )
+    conn.execute(
+        "INSERT INTO thread_repos(thread_id,repo,worktree,branch,base_ref,base_sha,primary_repo) "
+        "VALUES(?,?,?,?,?,?,1)",
+        (tid, repo, path, branch, base_branch, base_sha),
+    )
+    conn.commit()
+    event(conn, tid, "adopt", f"emb={args.emb_task or '-'} path={path}")
+    print(f"adopted {tid}  {args.label or Path(path).name}")
+    print(f"  worktree {path}")
+    print(f"  branch   {branch}")
+    print(f"  workspace {ws_id}  pane {pane_id}")
+    if args.emb_task:
+        print(f"  emb task {args.emb_task}")
+    return tid
+
+
+def cmd_emb(args):
+    cwd = str(Path(args.cwd or os.getcwd()).resolve())
+    if not Path(cwd, ".emb-agent").exists():
+        die(f"not an emb-agent project: {cwd}")
+    if args.action == "status":
+        p = subprocess.run(["emb-agent", "start", "--json", "--cwd", cwd], text=True, capture_output=True)
+        if p.returncode != 0:
+            die(f"emb-agent start failed: {p.stderr.strip() or p.stdout.strip()}")
+        try:
+            d = json.loads(p.stdout)
+        except json.JSONDecodeError:
+            die(f"emb-agent returned non-JSON: {p.stdout[:200]}")
+        summary = d.get("summary") or {}
+        task = (summary.get("active_task") or {}).get("name", "")
+        journal = d.get("workspace_journal") or {}
+        gate = (d.get("agent_protocol") or {}).get("gate") or {}
+        print(f"project: {cwd}")
+        print(f"task:    {task or '-'}")
+        print(f"state:   {d.get('workflow_state', '-')}  action={d.get('action', '-')}")
+        print(f"journal: {journal.get('status', '-')}  {journal.get('title', '')}")
+        print(f"gate:    {gate.get('kind', '-')}  {gate.get('recommended_command', '')}")
+        return
+    if args.action == "adopt":
+        task = args.task
+        if not task or task == "current":
+            p = subprocess.run(["emb-agent", "start", "--json", "--cwd", cwd], text=True, capture_output=True)
+            if p.returncode != 0:
+                die(f"emb-agent start failed: {p.stderr.strip()}")
+            d = json.loads(p.stdout)
+            task = ((d.get("summary") or {}).get("active_task") or {}).get("name", "")
+            if not task:
+                die("no active emb task")
+        p = subprocess.run(["emb-agent", "task", "worktree", "list", "--json", "--cwd", cwd],
+                           text=True, capture_output=True)
+        try:
+            data = json.loads(p.stdout) if p.returncode == 0 else {}
+        except json.JSONDecodeError:
+            data = {}
+        wt = next((x for x in data.get("worktrees", []) if x.get("task") == task or x.get("task_name") == task), None)
+        if not wt:
+            p = subprocess.run(["emb-agent", "task", "activate", task, "--worktree", "--json", "--cwd", cwd],
+                               text=True, capture_output=True)
+            if p.returncode != 0:
+                die(f"emb task activate failed: {p.stderr.strip() or p.stdout.strip()}")
+            p = subprocess.run(["emb-agent", "task", "worktree", "list", "--json", "--cwd", cwd],
+                               text=True, capture_output=True)
+            try:
+                data = json.loads(p.stdout)
+            except json.JSONDecodeError:
+                data = {}
+            wt = next((x for x in data.get("worktrees", []) if x.get("task") == task or x.get("task_name") == task), None)
+        if not wt:
+            die(f"no emb worktree for task: {task}")
+        path = wt.get("path") or wt.get("worktree_path")
+        if not path:
+            die(f"emb worktree has no path: {wt}")
+        return cmd_adopt(argparse.Namespace(
+            repo=cwd, path=path, label=f"emb: {task}", emb_task=task, base=args.base or "main",
+            branch=wt.get("branch"), agent=args.agent, no_agent=args.no_agent, parent=None))
+    die(f"unknown emb action: {args.action}")
 
 
 def cmd_children(args):
@@ -3743,6 +3879,27 @@ def build_parser():
     dh.add_argument("--pr", action="store_true")
     dh.add_argument("--cleanup", action="store_true")
     dh.set_defaults(func=cmd_done_here)
+
+    ad = sub.add_parser("adopt", help="adopt an existing worktree into a thread")
+    ad.add_argument("path")
+    ad.add_argument("--repo", default=".")
+    ad.add_argument("--label")
+    ad.add_argument("--branch")
+    ad.add_argument("--base", default="main")
+    ad.add_argument("--emb-task")
+    ad.add_argument("--agent")
+    ad.add_argument("--no-agent", action="store_true")
+    ad.add_argument("--parent")
+    ad.set_defaults(func=cmd_adopt)
+
+    em = sub.add_parser("emb", help="emb-agent bridge")
+    em.add_argument("action", choices=["status", "adopt"])
+    em.add_argument("task", nargs="?")
+    em.add_argument("--cwd")
+    em.add_argument("--base")
+    em.add_argument("--agent")
+    em.add_argument("--no-agent", action="store_true")
+    em.set_defaults(func=cmd_emb)
 
     ch = sub.add_parser("children", help="show child threads")
     ch.add_argument("id")

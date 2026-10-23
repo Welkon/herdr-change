@@ -285,3 +285,12 @@ backup  prune  doctor
 - PR：GitHub/GitLab/Azure 创建与状态读取
 - 写命令文件锁
 - SQLite `user_version=3`；unit + smoke + GitHub Actions
+
+## 9. emb-agent 桥接（L1）
+
+- `emb status`：只读 active task / gate / journal
+- `emb adopt`：用 emb 创建/选择 worktree，再 `herdr worktree open` 接管
+- thread 记录 `emb_task`；`list/show` 显示
+- `cleanup` 先调 `emb-agent task worktree cleanup`
+- 不自己给 `.emb-agent` 项目建 git worktree
+- 待做：land 前 emb verification gate、emb finish 回写

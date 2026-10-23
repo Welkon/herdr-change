@@ -166,6 +166,8 @@ thread
 | `tag` | 标签 / 收藏 / 归档 |
 | `cleanup` | 移除所有 repo 的 worktree + workspace |
 | `recover` | 重新绑定 workspace/pane/agent；`--create/--start/--prune` |
+| `emb` | emb-agent 项目桥接：`status` / `adopt` |
+| `adopt` | 接管已有 worktree（不新建） |
 | `machines` | 列出 herdr SSH machines |
 | `remote` | 透传远端命令：`remote mini agent list` |
 | `mirror` / `remote-threads` | 拉取远端 herdr-thread 列表到本地 DB 并查看 |
@@ -258,6 +260,28 @@ herdr-thread review <id> --sync-reviewr
 ```
 
 补丁源码提交在 reviewr 插件仓库本地分支 `1746108`；`bin/herdr-reviewr` 已替换为新构建。
+
+## emb-agent 项目
+
+不要在 `.emb-agent` 项目里直接用 `task` 新建 worktree，会绕过 emb 生命周期。用桥接：
+
+```bash
+cd ~/emb/workspace/QP/QP-GD26-0901
+herdr-thread emb status
+herdr-thread emb adopt              # 接管当前 active task 的 emb worktree
+herdr-thread emb adopt --no-agent   # 只占位，不起 agent
+```
+
+`emb adopt` 会：
+
+- 读取 active task
+- 调 `emb-agent task activate --worktree`（没有 worktree 时）
+- `herdr worktree open` 接管已有 worktree
+- 在 herdr-thread DB 记录 `emb_task`
+
+`cleanup` 会先调 `emb-agent task worktree cleanup`，不会绕过 emb。
+
+目前只做接管；`land` 前自动跑 emb verification 还没接。
 
 ## 本地等价物
 
