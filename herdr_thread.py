@@ -1926,8 +1926,9 @@ def cleanup_thread(conn, r, force=False):
     if r["emb_task"]:
         p = run(["emb-agent", "task", "worktree", "cleanup", r["emb_task"], "--cwd", r["repo"]], check=False)
         if p.returncode != 0:
-            print(f"warning: emb worktree cleanup failed: {p.stderr.strip() or p.stdout.strip()}", file=sys.stderr)
-            ok = False
+            print(f"refusing cleanup: emb worktree is not clean: {p.stderr.strip() or p.stdout.strip()}", file=sys.stderr)
+            print("resolve emb state first (commit/reset/clean), then retry", file=sys.stderr)
+            return
     repos = repo_rows(conn, r)
     if ws:
         try:
