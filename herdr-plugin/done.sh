@@ -1,5 +1,6 @@
 #!/bin/sh
-[ -n "${HERDR_ACTIVE_PANE_CWD:-}" ] && cd "$HERDR_ACTIVE_PANE_CWD" 2>/dev/null || true
+[ -n "${HERDR_THREAD_CWD:-}" ] && cd "$HERDR_THREAD_CWD" 2>/dev/null || true
+[ -z "${HERDR_THREAD_CWD:-}" ] && [ -n "${HERDR_ACTIVE_PANE_CWD:-}" ] && cd "$HERDR_ACTIVE_PANE_CWD" 2>/dev/null || true
 d="$PWD"
 emb=""
 while [ "$d" != "/" ]; do
