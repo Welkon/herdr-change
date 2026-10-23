@@ -221,7 +221,7 @@ herdr-thread join <id> 1
 ## 配置
 
 ```toml
-worktree_root = "~/.herdr-worktrees"
+worktree_root = "~/.herdr/worktrees"
 default_agent = "codex"
 land_strategy = "push"       # push | pr | merge | merge-pr | hook
 notify = true
