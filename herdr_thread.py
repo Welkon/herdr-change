@@ -532,14 +532,15 @@ def cmd_new(args):
     for x in repos:
         if not is_git_repo(x):
             die(f"not a git repository: {x}")
-        if (Path(x) / ".emb-agent").exists():
+        emb_root = emb_project_root(x)
+        if emb_root:
             task = ""
             try:
-                task = (Path(x) / ".emb-agent" / ".current-task").read_text().strip()
+                task = (emb_root / ".emb-agent" / ".current-task").read_text().strip()
             except OSError:
                 pass
             if not getattr(args, "allow_emb", False):
-                die(f"{x} is emb-agent managed"
+                die(f"{emb_root} is emb-agent managed"
                     + (f" (current task: {task})" if task else "")
                     + "; use `herdr-thread emb adopt` or pass --allow-emb to force a separate worktree")
             print(f"warning: forcing herdr-thread worktree in emb-agent project {x}", file=sys.stderr)
@@ -700,6 +701,14 @@ def start_agent(name: str, kind: str, pane_id: str, workspace_id: str, cwd: str,
                 time.sleep(1.5)
         print(f"herdr-thread: agent kind {k} failed: {last}", file=sys.stderr)
     print(f"herdr-thread: warning: agent start failed: {last}", file=sys.stderr)
+    return None
+
+
+def emb_project_root(path: str):
+    p = Path(path).resolve()
+    for candidate in [p, *p.parents]:
+        if (candidate / ".emb-agent").exists():
+            return candidate
     return None
 
 
