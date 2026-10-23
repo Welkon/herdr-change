@@ -3659,7 +3659,12 @@ def cmd_config(args):
             section, leaf = args.key.rsplit(".", 1)
             sec_pat = re.compile(rf"^\[{re.escape(section)}\]\s*$", re.M)
             m = sec_pat.search(text)
-            line = f"{leaf} = {val if val.startswith(('[', '{')) or val.lower() in ('true','false') or re.fullmatch(r'-?\d+', val) else json.dumps(val)}"
+            if (val.startswith(("[", "{"))
+                    or val.lower() in ("true", "false")
+                    or re.fullmatch(r"-?\d+", val)):
+                line = f"{leaf} = {val}"
+            else:
+                line = f"{leaf} = " + json.dumps(val)
             if m:
                 start = m.end()
                 nxt = re.search(r"^\[", text[start:], re.M)

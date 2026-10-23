@@ -3,10 +3,16 @@ on: [push, pull_request]
 jobs:
   python:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the declared floor: keep it so 3.12+ only syntax (e.g. PEP 701
+        # f-strings with backslashes) is caught before release.
+        python-version: ["3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - run: python -m py_compile herdr_change.py
+          python-version: ${{ matrix.python-version }}
+      - run: python -m py_compile herdr_change.py tests/test_basic.py
       - run: python -m unittest discover -s tests -p 'test_*.py'
