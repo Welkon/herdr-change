@@ -2022,7 +2022,9 @@ def cmd_done_here(args):
     if not r:
         die(f"no herdr-thread for cwd: {path}")
     cmd_done(argparse.Namespace(id=r["id"], strategy=None, into=None, pr=args.pr,
-                                cleanup=args.cleanup, delete_branch=False, message=None))
+                                cleanup=args.cleanup, delete_branch=False, message=None,
+                                skip_emb_check=False, emb_finish=False,
+                                emb_disposition=None, emb_summary=None))
 
 
 def _open_existing_workspace(repo: str, path: str, label: str):
