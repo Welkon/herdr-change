@@ -1936,8 +1936,8 @@ def cleanup_thread(conn, r, force=False):
         p = run(["emb-agent", "task", "worktree", "cleanup", r["emb_task"], "--cwd", r["repo"]], check=False)
         if p.returncode != 0:
             print(f"refusing cleanup: emb worktree is not clean: {p.stderr.strip() or p.stdout.strip()}", file=sys.stderr)
-            print("resolve emb state first (commit/reset/clean), then retry", file=sys.stderr)
-            return
+            print("resolve emb state first (checkpoint/commit), then retry; or close the window only", file=sys.stderr)
+            return False
     repos = repo_rows(conn, r)
     if ws:
         try:
@@ -1962,12 +1962,14 @@ def cleanup_thread(conn, r, force=False):
     conn.commit()
     event(conn, r["id"], "cleaned", "worktrees removed" if ok else "some worktrees may remain")
     print(f"cleaned {r['id']}  {'(worktrees removed)' if ok else '(some worktrees may remain)'}")
+    return ok
 
 
 def cmd_cleanup(args):
     conn = db()
     r = thread_row(conn, args.id)
-    cleanup_thread(conn, r, force=args.force)
+    if cleanup_thread(conn, r, force=args.force) is False:
+        raise SystemExit(1)
 
 
 def cmd_diff(args):
@@ -3508,7 +3510,9 @@ def cmd_close_here(args):
             herdr("workspace", "close", r["workspace_id"])
         print(f"closed workspace for {r['id']} (worktree kept)")
     else:
-        cleanup_thread(conn, r, force=False)
+        if cleanup_thread(conn, r, force=False) is False:
+            print("worktree kept and workspace left open; use --window to close only the window", file=sys.stderr)
+            raise SystemExit(1)
 
 
 def cmd_ui(args):
