@@ -2,6 +2,8 @@
 [ -n "${HERDR_THREAD_CWD:-}" ] && cd "$HERDR_THREAD_CWD" 2>/dev/null || true
 [ -z "${HERDR_THREAD_CWD:-}" ] && [ -n "${HERDR_ACTIVE_PANE_CWD:-}" ] && cd "$HERDR_ACTIVE_PANE_CWD" 2>/dev/null || true
 
+printf '%s task cwd=%s\n' "$(date +%H:%M:%S)" "$PWD" >> /tmp/herdr-thread-plugin.log 2>/dev/null || true
+
 # Refuse before showing the task UI in emb-agent projects.
 d="$PWD"
 while [ "$d" != "/" ]; do
