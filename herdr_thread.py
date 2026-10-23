@@ -707,7 +707,9 @@ def start_agent(name: str, kind: str, pane_id: str, workspace_id: str, cwd: str,
 def emb_project_root(path: str):
     p = Path(path).resolve()
     for candidate in [p, *p.parents]:
-        if (candidate / ".emb-agent").exists():
+        emb = candidate / ".emb-agent"
+        if emb.is_dir() and any((emb / marker).exists() for marker in
+                                ("project.json", "config.yaml", ".current-task")):
             return candidate
     return None
 
@@ -2131,8 +2133,10 @@ def cmd_adopt(args):
 
 def cmd_emb(args):
     cwd = str(Path(args.cwd or os.getcwd()).resolve())
-    if not Path(cwd, ".emb-agent").exists():
+    root = emb_project_root(cwd)
+    if not root:
         die(f"not an emb-agent project: {cwd}")
+    cwd = str(root)
     if args.action == "status":
         p = subprocess.run(["emb-agent", "start", "--json", "--cwd", cwd], text=True, capture_output=True)
         if p.returncode != 0:

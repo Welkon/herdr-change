@@ -7,7 +7,7 @@ printf '%s task cwd=%s\n' "$(date +%H:%M:%S)" "$PWD" >> /tmp/herdr-thread-plugin
 # Refuse before showing the task UI in emb-agent projects.
 d="$PWD"
 while [ "$d" != "/" ]; do
-  if [ -d "$d/.emb-agent" ]; then
+  if [ -d "$d/.emb-agent" ] && { [ -f "$d/.emb-agent/project.json" ] || [ -f "$d/.emb-agent/config.yaml" ] || [ -f "$d/.emb-agent/.current-task" ]; }; then
     printf '\n  emb-agent project: adopting current task...\n\n'
     if ! /home/felix/.local/bin/herdr-thread emb adopt --focus; then
       printf '\n  Could not adopt. Use: herdr-thread emb status\n\n'

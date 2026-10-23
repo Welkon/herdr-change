@@ -4,7 +4,7 @@
 d="$PWD"
 emb=""
 while [ "$d" != "/" ]; do
-  if [ -d "$d/.emb-agent" ]; then emb="--emb-finish"; break; fi
+  if [ -d "$d/.emb-agent" ] && { [ -f "$d/.emb-agent/project.json" ] || [ -f "$d/.emb-agent/config.yaml" ] || [ -f "$d/.emb-agent/.current-task" ]; }; then emb="--emb-finish"; break; fi
   d=$(dirname "$d")
 done
 
