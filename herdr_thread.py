@@ -2170,9 +2170,13 @@ def cmd_resume(args):
         pane_id = r["pane_id"] if any(p.get("pane_id") == r["pane_id"] for p in panes) else (panes[0]["pane_id"] if panes else None)
     agents = agent_states()
     agent_name = r["agent_name"]
-    if pane_id and pane_id not in agents and r["agent_kind"]:
+    kind = getattr(args, "agent", None) or r["agent_kind"]
+    if pane_id and pane_id not in agents and kind:
         agent_name = agent_name or f"ht-{r['id']}"
-        start_agent(agent_name, r["agent_kind"], pane_id, ws_id, r["worktree"], fallbacks=[])
+        started = start_agent(agent_name, kind, pane_id, ws_id, r["worktree"],
+                              fallbacks=load_config().get("fallback") or [])
+        if started:
+            conn.execute("UPDATE threads SET agent_kind=? WHERE id=?", (kind, r["id"]))
     conn.execute("UPDATE threads SET workspace_id=?, pane_id=?, agent_name=?, status=CASE WHEN status='orphaned' THEN 'created' ELSE status END WHERE id=?",
                  (ws_id, pane_id, agent_name, r["id"]))
     conn.commit()
@@ -3908,6 +3912,7 @@ def build_parser():
 
     rs = sub.add_parser("resume", help="rebind/focus a thread and start agent if needed")
     rs.add_argument("id")
+    rs.add_argument("--agent", help="agent kind to start if none is running")
     rs.set_defaults(func=cmd_resume)
 
     rn = sub.add_parser("rename", help="rename a thread")
