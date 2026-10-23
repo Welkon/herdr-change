@@ -263,7 +263,13 @@ herdr-thread review <id> --sync-reviewr
 
 ## emb-agent 项目
 
-不要在 `.emb-agent` 项目里直接用 `task` / `prefix+t` 新建 worktree，会绕过 emb 生命周期；现在会直接被拒绝。用桥接：
+`.emb-agent` 项目里：
+
+- `prefix+t` 会自动接管当前 emb task（不显示新建任务输入框）
+- `herdr-thread task` 仍会拒绝，避免误建第二套 worktree
+- `prefix+alt+d` 会在 land 后自动 `--emb-finish`
+
+手动桥接：
 
 ```bash
 cd ~/emb/workspace/QP/QP-GD26-0901

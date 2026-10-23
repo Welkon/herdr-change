@@ -2033,7 +2033,7 @@ def cmd_done_here(args):
         die(f"no herdr-thread for cwd: {path}")
     cmd_done(argparse.Namespace(id=r["id"], strategy=None, into=None, pr=args.pr,
                                 cleanup=args.cleanup, delete_branch=False, message=None,
-                                skip_emb_check=False, emb_finish=False,
+                                skip_emb_check=False, emb_finish=args.emb_finish,
                                 emb_disposition=None, emb_summary=None))
 
 
@@ -2062,6 +2062,30 @@ def cmd_adopt(args):
         die(f"worktree missing: {path}")
     branch = git(path, "rev-parse", "--abbrev-ref", "HEAD", check=False) or args.branch or ""
     base_branch = args.base or "main"
+    if args.emb_task:
+        existing = conn.execute(
+            "SELECT * FROM threads WHERE archived=0 AND emb_task=? AND worktree=?", (args.emb_task, path)
+        ).fetchone()
+        if existing:
+            ws_id = existing["workspace_id"]
+            pane_id = existing["pane_id"]
+            if not ws_id:
+                ws_id, pane_id = _open_existing_workspace(repo, path, existing["label"])
+            if not pane_id:
+                panes = pane_list(ws_id)
+                pane_id = panes[0]["pane_id"] if panes else None
+            kind = args.agent or existing["agent_kind"] or cfg["default_agent"]
+            name = existing["agent_name"] or f"ht-{existing['id']}"
+            if pane_id and not args.no_agent and not agent_states().get(pane_id):
+                start_agent(name, kind, pane_id, ws_id, path, fallbacks=cfg.get("fallback") or [])
+            conn.execute("UPDATE threads SET workspace_id=?, pane_id=?, agent_name=?, agent_kind=? WHERE id=?",
+                         (ws_id, pane_id, name if not args.no_agent else existing["agent_name"],
+                          kind if not args.no_agent else existing["agent_kind"], existing["id"]))
+            conn.commit()
+            if getattr(args, "focus", False):
+                herdr("workspace", "focus", ws_id)
+            print(f"already adopted {existing['id']}  {existing['label']}")
+            return existing["id"]
     base_sha = git(path, "merge-base", base_branch, "HEAD", check=False)
     ws_id, pane_id = _open_existing_workspace(repo, path, args.label or Path(path).name)
     if not pane_id:
@@ -2098,6 +2122,8 @@ def cmd_adopt(args):
     print(f"  workspace {ws_id}  pane {pane_id}")
     if args.emb_task:
         print(f"  emb task {args.emb_task}")
+    if getattr(args, "focus", False):
+        herdr("workspace", "focus", ws_id)
     return tid
 
 
@@ -2159,7 +2185,8 @@ def cmd_emb(args):
             die(f"emb worktree has no path: {wt}")
         return cmd_adopt(argparse.Namespace(
             repo=cwd, path=path, label=f"emb: {task}", emb_task=task, base=args.base or "main",
-            branch=wt.get("branch"), agent=args.agent, no_agent=args.no_agent, parent=None))
+            branch=wt.get("branch"), agent=args.agent, no_agent=args.no_agent, parent=None,
+            focus=getattr(args, "focus", False)))
     die(f"unknown emb action: {args.action}")
 
 
@@ -3935,6 +3962,7 @@ def build_parser():
     dh.add_argument("--path")
     dh.add_argument("--pr", action="store_true")
     dh.add_argument("--cleanup", action="store_true")
+    dh.add_argument("--emb-finish", action="store_true")
     dh.set_defaults(func=cmd_done_here)
 
     ad = sub.add_parser("adopt", help="adopt an existing worktree into a thread")
@@ -3946,6 +3974,7 @@ def build_parser():
     ad.add_argument("--emb-task")
     ad.add_argument("--agent")
     ad.add_argument("--no-agent", action="store_true")
+    ad.add_argument("--focus", action="store_true")
     ad.add_argument("--parent")
     ad.set_defaults(func=cmd_adopt)
 
@@ -3956,6 +3985,7 @@ def build_parser():
     em.add_argument("--base")
     em.add_argument("--agent")
     em.add_argument("--no-agent", action="store_true")
+    em.add_argument("--focus", action="store_true")
     em.set_defaults(func=cmd_emb)
 
     ch = sub.add_parser("children", help="show child threads")

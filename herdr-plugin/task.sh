@@ -5,12 +5,13 @@
 d="$PWD"
 while [ "$d" != "/" ]; do
   if [ -d "$d/.emb-agent" ]; then
-    printf '\n  This is an emb-agent project.\n\n'
-    printf '  Use:  herdr-thread emb adopt\n\n'
-    printf '  herdr-thread will not create a second worktree here.\n\n'
-    printf '  Press Enter to close...'
-    read -r _ || true
-    exit 1
+    printf '\n  emb-agent project: adopting current task...\n\n'
+    if ! /home/felix/.local/bin/herdr-thread emb adopt --focus; then
+      printf '\n  Could not adopt. Use: herdr-thread emb status\n\n'
+      printf '  Press Enter to close...'
+      read -r _ || true
+    fi
+    exit 0
   fi
   d=$(dirname "$d")
 done
