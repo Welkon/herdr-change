@@ -293,4 +293,6 @@ backup  prune  doctor
 - thread 记录 `emb_task`；`list/show` 显示
 - `cleanup` 先调 `emb-agent task worktree cleanup`
 - 不自己给 `.emb-agent` 项目建 git worktree
-- 待做：land 前 emb verification gate、emb finish 回写
+- `land` 前跑 `emb-agent start --json` gate；`--skip-emb-check` 可覆盖
+- `--emb-finish` 在 land 后调用 `emb-agent finish-work` 回写 journal
+- 待做：自动生成 emb verification（当前由 emb 自己的流程完成）

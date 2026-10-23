@@ -730,7 +730,9 @@ def cmd_done(args):
         title=None, body=None, cleanup=args.cleanup, yes=True, dry_run=False,
         continue_on_error=False, allow_dirty=False, force=False, skip_checks=False,
         method="squash", delete_branch=args.delete_branch, auto=False, json=False,
-        target=None, skip_deps=False,
+        target=None, skip_deps=False, skip_emb_check=args.skip_emb_check,
+        emb_finish=args.emb_finish, emb_disposition=args.emb_disposition,
+        emb_summary=args.emb_summary,
     ))
     print(f"\ndone: {r['id']}")
 
@@ -1637,6 +1639,23 @@ def run_pre_land(cfg, r):
             print(p.stdout.strip()[-2000:])
 
 
+def emb_gate(r):
+    if not r["emb_task"]:
+        return
+    p = subprocess.run(["emb-agent", "start", "--json", "--cwd", r["worktree"]],
+                       text=True, capture_output=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"emb gate failed: {p.stderr.strip() or p.stdout.strip()}")
+    try:
+        d = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError("emb gate returned non-JSON")
+    gate = (d.get("agent_protocol") or {}).get("gate") or {}
+    action = d.get("action")
+    if action == "verify" or gate.get("kind") == "task-verification":
+        raise RuntimeError(f"emb verification pending for {r['emb_task']}; run emb verify (or --skip-emb-check)")
+
+
 def _land_one(cfg, conn, r, args) -> str:
     if r["status"] == "landed":
         raise RuntimeError(f"thread {r['id']} already landed")
@@ -1655,6 +1674,8 @@ def _land_one(cfg, conn, r, args) -> str:
         raise RuntimeError("review is rejected; pass --force to override")
     if cfg.get("require_approval") and r["review_state"] != "approved" and not args.force:
         raise RuntimeError(f"review_state is {r['review_state'] or 'empty'}; approval required (or --force)")
+    if r["emb_task"] and not getattr(args, "skip_emb_check", False):
+        emb_gate(r)
     if not getattr(args, "skip_deps", False):
         for d in conn.execute("SELECT depends_on FROM thread_deps WHERE thread_id=?", (r["id"],)).fetchall():
             dep = conn.execute("SELECT * FROM threads WHERE id=?", (d["depends_on"],)).fetchone()
@@ -1792,6 +1813,15 @@ def _land_one(cfg, conn, r, args) -> str:
                   "--body", f"{len(repos)} repo(s) ({strategy})", "--sound", "done")
         except Exception:
             pass
+    if r["emb_task"] and getattr(args, "emb_finish", False):
+        p = run(["emb-agent", "finish-work", "--task", r["emb_task"],
+                 "--disposition", getattr(args, "emb_disposition", None) or "no-update",
+                 "--summary", getattr(args, "emb_summary", None) or f"landed {r['branch']}",
+                 "--cwd", r["worktree"], "--json"], check=False)
+        if p.returncode != 0:
+            print(f"warning: emb finish-work failed: {p.stderr.strip() or p.stdout.strip()}", file=sys.stderr)
+        else:
+            messages.append("emb finish-work recorded")
     if args.cleanup:
         r = conn.execute("SELECT * FROM threads WHERE id=?", (r["id"],)).fetchone()
         cleanup_thread(conn, r, force=True)
@@ -3722,6 +3752,10 @@ def build_parser():
     dn.add_argument("--pr", action="store_true", help="shortcut for --strategy pr")
     dn.add_argument("--cleanup", action="store_true")
     dn.add_argument("--delete-branch", action="store_true")
+    dn.add_argument("--skip-emb-check", action="store_true")
+    dn.add_argument("--emb-finish", action="store_true")
+    dn.add_argument("--emb-disposition")
+    dn.add_argument("--emb-summary")
     dn.add_argument("-m", "--message")
     dn.set_defaults(func=cmd_done)
 
@@ -3846,6 +3880,10 @@ def build_parser():
     ld.add_argument("--strategy", choices=["push", "pr", "merge", "merge-pr", "local", "hook"])
     ld.add_argument("--target")
     ld.add_argument("--skip-deps", action="store_true")
+    ld.add_argument("--skip-emb-check", action="store_true")
+    ld.add_argument("--emb-finish", action="store_true")
+    ld.add_argument("--emb-disposition")
+    ld.add_argument("--emb-summary")
     ld.add_argument("--into")
     ld.add_argument("--title")
     ld.add_argument("--body")

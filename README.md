@@ -155,7 +155,7 @@ thread
 | `delta` | 别名：open/thread/worktree/auth(login/logout/status)/integration |
 | `restore-db` | 从 backup 恢复 threads.db |
 | `checkpoint` | 提交 / `--list` / `--restore`，每个 repo 单独记录 |
-| `land` | `push/pr/merge/merge-pr/local/hook`；批量 `--all/--tag`；dirty/verdict/pre-land/deps gate |
+| `land` | push/pr/merge/merge-pr/local/hook；批量；dirty/verdict/pre-land/deps/emb gate；`--emb-finish` |
 | `pr` | 查看 / `--watch` PR + CI；GitHub/GitLab/Azure（需 gh/glab/az） |
 | `sync` | 刷新 agent 状态；`--rebase`（先 fetch）；`--pr` |
 | `watch` | 后台轮询；`--daemon/--status/--stop` |
@@ -281,7 +281,19 @@ herdr-thread emb adopt --no-agent   # 只占位，不起 agent
 
 `cleanup` 会先调 `emb-agent task worktree cleanup`，不会绕过 emb。
 
-目前只做接管；`land` 前自动跑 emb verification 还没接。
+`land` 前会检查 emb gate：如果 active task 还在 `verify`，会直接阻断：
+
+```text
+emb verification pending ... run emb verify (or --skip-emb-check)
+```
+
+验证通过后可选择：
+
+```bash
+herdr-thread land <id> --emb-finish --emb-disposition no-update --emb-summary "..."
+```
+
+`--emb-finish` 会在 land 后调用 `emb-agent finish-work` 回写 journal。
 
 ## 本地等价物
 
