@@ -538,10 +538,11 @@ def cmd_new(args):
                 task = (Path(x) / ".emb-agent" / ".current-task").read_text().strip()
             except OSError:
                 pass
-            print(f"warning: {x} is emb-agent managed"
-                  + (f" (current task: {task})" if task else "")
-                  + "; herdr-thread uses a separate worktree/session and will bypass emb lifecycle",
-                  file=sys.stderr)
+            if not getattr(args, "allow_emb", False):
+                die(f"{x} is emb-agent managed"
+                    + (f" (current task: {task})" if task else "")
+                    + "; use `herdr-thread emb adopt` or pass --allow-emb to force a separate worktree")
+            print(f"warning: forcing herdr-thread worktree in emb-agent project {x}", file=sys.stderr)
         if run(["git", "-C", x, "rev-parse", "--verify", "HEAD"], check=False).returncode != 0:
             die(f"repository has no commits yet: {x}")
 
@@ -708,7 +709,7 @@ def cmd_task(args):
         label=label, repo=args.repo, base=args.base, branch=None, worktree=None,
         agent=args.agent, no_agent=False, prompt=args.text, tag=None, parent=None,
         focus=True, trust_repository=False, profile=args.profile, role=args.role,
-        run_hooks=False, extra_agent_args=[],
+        run_hooks=False, extra_agent_args=[], allow_emb=args.allow_emb,
     )
     tid = cmd_new(ns)
     print(f"\nready: herdr-thread show {tid}   |   review: herdr-thread review {tid}")
@@ -3730,6 +3731,7 @@ def build_parser():
     n.add_argument("--tag")
     n.add_argument("--parent")
     n.add_argument("--run-hooks", action="store_true", help="run .agents/prepare and .agents/setup")
+    n.add_argument("--allow-emb", action="store_true", help="force a herdr worktree in an emb-agent project")
     n.add_argument("--focus", action="store_true")
     n.add_argument("--no-focus", action="store_true")
     n.add_argument("--trust-repository", action="store_true")
@@ -3743,6 +3745,7 @@ def build_parser():
     tk.add_argument("--profile")
     tk.add_argument("--role")
     tk.add_argument("--label")
+    tk.add_argument("--allow-emb", action="store_true")
     tk.set_defaults(func=cmd_task)
 
     dn = sub.add_parser("done", help="one-shot: checkpoint + push/PR")

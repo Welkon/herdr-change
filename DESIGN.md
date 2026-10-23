@@ -292,7 +292,7 @@ backup  prune  doctor
 - `emb adopt`：用 emb 创建/选择 worktree，再 `herdr worktree open` 接管
 - thread 记录 `emb_task`；`list/show` 显示
 - `cleanup` 先调 `emb-agent task worktree cleanup`
-- 不自己给 `.emb-agent` 项目建 git worktree
+- `new/task` 在 `.emb-agent` 项目默认拒绝；必须 `emb adopt` 或显式 `--allow-emb`
 - `land` 前跑 `emb-agent start --json` gate；`--skip-emb-check` 可覆盖
 - `--emb-finish` 在 land 后调用 `emb-agent finish-work` 回写 journal
 - 待做：自动生成 emb verification（当前由 emb 自己的流程完成）
