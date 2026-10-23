@@ -1,9 +1,9 @@
-id = "herdr-thread.ui"
-name = "herdr-thread UI"
-version = "0.1.0"
+id = "herdr-change.ui"
+name = "herdr-change UI"
+version = "0.4.0"
 min_herdr_version = "0.9.0"
 platforms = ["linux", "macos"]
-description = "New task and finish-thread popups for herdr-thread."
+description = "New task and finish-change popups for herdr-change."
 
 [[panes]]
 id = "task"
@@ -11,38 +11,38 @@ title = "new task"
 placement = "popup"
 width = "52%"
 height = "46%"
-command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-/home/felix/herdr-thread/herdr-plugin}/task.sh\""]
+command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-$HOME/herdr-change/herdr-plugin}/task.sh\""]
 
 [[panes]]
 id = "done"
-title = "finish thread"
+title = "finish change"
 placement = "popup"
 width = "52%"
 height = "50%"
-command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-/home/felix/herdr-thread/herdr-plugin}/done.sh\""]
+command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-$HOME/herdr-change/herdr-plugin}/done.sh\""]
 
 [[panes]]
 id = "close"
-title = "close task"
+title = "close change"
 placement = "popup"
 width = "52%"
 height = "42%"
-command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-/home/felix/herdr-thread/herdr-plugin}/close.sh\""]
+command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-$HOME/herdr-change/herdr-plugin}/close.sh\""]
 
 [[actions]]
 id = "close"
-title = "herdr-thread: close current"
+title = "herdr-change: close current"
 contexts = ["pane", "workspace"]
 command = ["bash", "open.sh", "close"]
 
 [[actions]]
 id = "task"
-title = "herdr-thread: new task"
+title = "herdr-change: new task"
 contexts = ["pane", "workspace"]
 command = ["bash", "open.sh", "task"]
 
 [[actions]]
 id = "done"
-title = "herdr-thread: finish thread"
+title = "herdr-change: finish change"
 contexts = ["pane", "workspace"]
 command = ["bash", "open.sh", "done"]

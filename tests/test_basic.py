@@ -3,13 +3,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import herdr_thread as ht
+import herdr_change as ht
 
 
 class BasicTests(unittest.TestCase):
     def test_slugify(self):
         self.assertEqual(ht.slugify("Hello, World!"), "hello-world")
-        self.assertEqual(ht.slugify("***"), "thread")
+        self.assertEqual(ht.slugify("***"), "change")
 
     def test_ci_state(self):
         self.assertEqual(ht.ci_state([]), "none")

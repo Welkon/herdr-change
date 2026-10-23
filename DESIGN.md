@@ -1,124 +1,126 @@
-# herdr-thread：用 herdr 复刻 Delta 的好用功能
+> English · [中文](DESIGN.zh-CN.md)
 
-目标：不依赖 Delta GUI，用 **herdr 原生能力 + reviewr 插件 + 一个轻量编排层 `herdr-thread`**，
-覆盖 Delta 里真正有价值的工作流。
+# herdr-change: rebuilding Delta's good parts on herdr
 
-状态图例：✅ 已由 herdr 原生提供 · 🟡 本项目 MVP 提供 · 🔵 脚本/插件可补 · ❌ 明确不追
+Goal: drop the Delta GUI and cover the workflows that were actually valuable in Delta with
+**native herdr features + the reviewr plugin + one thin orchestration layer, `herdr-change`**.
+
+Legend: ✅ provided by herdr · 🟡 provided by this project (MVP) · 🔵 scriptable/plugin work · ❌ explicitly out of scope
 
 ---
 
-## 1. Delta 功能清单 → herdr 替代
+## 1. Delta feature list → herdr equivalent
 
-### A. 工作单元与隔离
+### A. Unit of work and isolation
 
-| # | Delta 功能 | 好用的点 | herdr 替代 | 状态 |
+| # | Delta feature | Why it's good | herdr equivalent | Status |
 |---|---|---|---|---|
-| A1 | Thread（线程） | 需求、对话、改动、审查都留在一个上下文里 | `herdr-thread` 的 thread 记录 = workspace + agent + worktree + 状态 | 🟡 |
-| A2 | Delta worktree | 每个任务独占一个 checkout，互不污染 | `herdr worktree create/list/open/remove`，workspace 绑定 worktree | ✅ |
-| A3 | 本地 checkout / attach | 不发布也能把已有目录接进工作流 | `herdr worktree open` / `workspace create --cwd` | ✅ |
-| A4 | 必须有 remote | 保证 worktree 能 fetch/push | herdr 不强制；`herdr-thread land --push/--pr` 时才检查 | 🟡 |
-| A5 | 恢复/归档/标签/收藏 | 多任务不丢上下文 | thread DB 的 `status/tags/bookmarked/archived`；workspace 标签 | 🟡 |
-| A6 | Fork / 子线程 | 从当前改动分叉试另一条路 | `herdr-thread fork`：以父 thread 的 HEAD 建子 worktree + agent | 🟡 |
-| A7 | 多仓库/子模块 | 一个任务跨仓 | 每个 thread 绑一个 repo；多仓用多个 thread 或 `--repo` 多次 | 🔵 |
+| A1 | Change | Request, conversation, diff, and review live in one context | a `herdr-change` change record = workspace + agent + worktree + state | 🟡 |
+| A2 | Delta worktree | one checkout per task, no cross-contamination | `herdr worktree create/list/open/remove`, workspace bound to the worktree | ✅ |
+| A3 | Local checkout / attach | bring an existing directory into the workflow without publishing | `herdr worktree open` / `workspace create --cwd` | ✅ |
+| A4 | Remote is mandatory | guarantees fetch/push works | not enforced by herdr; checked at `herdr-change land --push/--pr` | 🟡 |
+| A5 | Restore/archive/tag/bookmark | many tasks without losing context | change DB `status/tags/bookmarked/archived`; workspace labels | 🟡 |
+| A6 | Fork / child changes | try a second approach from the current diff | `herdr-change fork`: child worktree + agent from the parent's HEAD | 🟡 |
+| A7 | Multi-repo / submodules | one task across repos | one repo per change record; use several changes or repeat `--repo` | 🔵 |
 
-### B. Agent 与并行
+### B. Agents and parallelism
 
-| # | Delta 功能 | 好用的点 | herdr 替代 | 状态 |
+| # | Delta feature | Why it's good | herdr equivalent | Status |
 |---|---|---|---|---|
-| B1 | 多 Agent 并行 | 每个任务一个 Agent | 每个 workspace 的 pane 起一个 `herdr agent start` | ✅ |
-| B2 | Subagents（Worker/Scout/Reviewer） | 子任务隔离、不同模型 | `herdr-thread subagent --profile worker/scout/reviewer`，各自 worktree + prompt | 🟡 |
-| B3 | Agent 状态/读取/等待 | 自动化编排 | `herdr agent list/get/read/wait/prompt/send-keys/focus` | ✅ |
-| B4 | 模型选择 | 不同任务不同模型 | Agent 启动参数/环境变量；`herdr-thread` 读取 profile 配置注入 | 🔵 |
-| B5 | 会话恢复 | 关掉再打开还能接上 | Agent 自身会话（codex/claude/pi）+ herdr 持久 session | ✅ |
+| B1 | Parallel agents | one agent per task | `herdr agent start` in each workspace pane | ✅ |
+| B2 | Sub-agents (Worker/Scout/Reviewer) | isolated subtasks, different models | `herdr-change subagent --profile worker/scout/reviewer`, own worktree + prompt | 🟡 |
+| B3 | Agent state/read/wait | automation | `herdr agent list/get/read/wait/prompt/send-keys/focus` | ✅ |
+| B4 | Model selection | different models per task | agent launch args/env; `herdr-change` injects profile config | 🔵 |
+| B5 | Session restore | close it, come back, keep going | the agent's own session (codex/claude/pi) + herdr's persistent session | ✅ |
 
-### C. 审查与合并（Delta 的核心卖点）
+### C. Review and merge (Delta's core selling point)
 
-| # | Delta 功能 | 好用的点 | herdr 替代 | 状态 |
+| # | Delta feature | Why it's good | herdr equivalent | Status |
 |---|---|---|---|---|
-| C1 | Review thread | 实现与审查分离 | `herdr-thread review`：开 reviewr + 可选 reviewer agent + 审查提示词 | 🟡 |
-| C2 | Diff 面板 | 看 Agent 改了什么 | **reviewr**：uncommitted/branch/last-turn/commits 四种 scope | ✅ |
-| C3 | 行内评论回传 | 评论直接变 Agent 输入 | **reviewr** line comments → send to agent | ✅ |
-| C4 | Change guide | 带讲解的 diff | `review` 生成 reviewer prompt，要求按文件/风险/验证讲一遍 | 🟡 |
-| C5 | Verdict | 通过/打回 | thread DB 的 `review_state` + `herdr-thread review --verdict` | 🟡 |
-| C6 | Land changes | 一键合并/推送 | `herdr-thread land --push` / `--pr`；`--merge` 走 `--into` 目标分支 | 🟡 |
-| C7 | Merge selected worktrees | 多线程合并 | 按依赖顺序逐个 `land`；批量脚本后续补 | 🔵 |
-| C8 | 检查远程分支 / bring changes in | 同步上游 | `git fetch` + `rebase` 封装进 `herdr-thread sync --rebase` | 🟡 |
-| C9 | PR 视图 | 不离开终端看 PR | reviewr 内置 PR tab（gh/glab/az） | ✅ |
+| C1 | Review change | implementation separated from review | `herdr-change review`: reviewr + optional reviewer agent + review prompt | 🟡 |
+| C2 | Diff panel | see what the agent changed | **reviewr**: uncommitted/branch/last-turn/commits scopes | ✅ |
+| C3 | Inline comments back to the agent | comments become agent input | **reviewr** line comments → send to agent | ✅ |
+| C4 | Change guide | an explained diff | `review` generates a reviewer prompt asking for file/risk/verification walkthrough | 🟡 |
+| C5 | Verdict | approve / reject | change DB `review_state` + `herdr-change review --verdict` | 🟡 |
+| C6 | Land changes | one-key merge/push | `herdr-change land --push` / `--pr`; `--merge` uses `--into` | 🟡 |
+| C7 | Merge selected worktrees | merge several changes | `land` one by one in dependency order; batch script later | 🔵 |
+| C8 | Check remote / bring changes in | sync upstream | `git fetch` + `rebase` wrapped in `herdr-change sync --rebase` | 🟡 |
+| C9 | PR view | see the PR without leaving the terminal | reviewr's built-in PR tab (gh/glab/az) | ✅ |
 
-### D. 终端
+### D. Terminals
 
-| # | Delta 功能 | 替代 | 状态 |
+| # | Delta feature | Equivalent | Status |
 |---|---|---|---|
-| D1 | 交互式终端 | herdr pane / tab | ✅ |
-| D2 | 后台终端 | 独立 tab/pane，`herdr pane run` | ✅ |
-| D3 | Agent 跑命令 | Agent 自身终端工具 | ✅ |
-| D4 | 共享线程里的终端 | herdr remote attach 同一 session | 🟡 |
+| D1 | Interactive terminal | herdr pane / tab | ✅ |
+| D2 | Background terminal | separate tab/pane, `herdr pane run` | ✅ |
+| D3 | Agent-run commands | the agent's own terminal tool | ✅ |
+| D4 | Terminal inside a shared change | herdr remote attach to the same session | 🟡 |
 
-### E. 规则 / 项目设置
+### E. Rules / project setup
 
-| # | Delta 功能 | 替代 | 状态 |
+| # | Delta feature | Equivalent | Status |
 |---|---|---|---|
-| E5 | `.agents/prepare` / setup | `new --run-hooks` 或 `setup <id>` | 🟡 |
-| E6 | 项目规则 | `.agents/` + Agent 自身规则文件 | ✅ |
+| E5 | `.agents/prepare` / setup | `new --run-hooks` or `setup <id>` | 🟡 |
+| E6 | Project rules | `.agents/` + the agent's own rule files | ✅ |
 
-### F. Provider / 模型
+### F. Providers / models
 
-| # | Delta 功能 | 替代 | 状态 |
+| # | Delta feature | Equivalent | Status |
 |---|---|---|---|
-| F1 | 自定义 provider | 由 codex/claude/pi 自己配置，本项目不管理 | ✅ |
-| F2 | 模型角色 / fallback | profile 配置 `model` + 启动参数；fallback 交给 Agent | 🔵 |
-| F3 | 上下文窗口/推理强度 | Agent 配置 | ✅ |
+| F1 | Custom providers | configured in codex/claude/pi; not managed here | ✅ |
+| F2 | Model roles / fallback | profile `model` + launch args; fallback delegated to the agent | 🔵 |
+| F3 | Context window / reasoning effort | agent config | ✅ |
 
-### G. 协作
+### G. Collaboration
 
-| # | Delta 功能 | 替代 | 状态 |
+| # | Delta feature | Equivalent | Status |
 |---|---|---|---|
-| G1 | 共享 thread / 实时协作 | `herdr --remote <ssh>` 让多人 attach 同一 session | 🟡 |
-| G2 | 评论/聊天/mention | reviewr 评论 + pane 里聊天；无 CRDT 富文本 | 🔵 |
-| G3 | 权限/邀请/谁付费 | SSH 账号权限；模型费用各付各的 | 🔵 |
-| G4 | Web 端 / Inbox | 不做；可用 ttyd 暴露 herdr（有安全风险） | ❌ |
-| G5 | 通知 | `herdr notification show --title ... --body ...` | ✅ |
+| G1 | Shared change / real-time collaboration | `herdr --remote <ssh>` lets several people attach to one session | 🟡 |
+| G2 | Comments/chat/mentions | reviewr comments + chat in the pane; no CRDT rich text | 🔵 |
+| G3 | Permissions/invites/who pays | SSH account permissions; everyone pays for their own model usage | 🔵 |
+| G4 | Web app / Inbox | not built; you can expose herdr with ttyd (security risk) | ❌ |
+| G5 | Notifications | `herdr notification show --title ... --body ...` | ✅ |
 
-### H. Cloud Runners
+### H. Cloud runners
 
-| # | Delta 功能 | 替代 | 状态 |
+| # | Delta feature | Equivalent | Status |
 |---|---|---|---|
-| H1 | 云端临时 Linux runner | `herdr machine` / `--remote` 到固定 VM；临时 runner 用脚本创建 | 🔵 |
-| H2 | `.agents/setup` / secrets | 在远程机器的 shell/profile 里做 | 🔵 |
-| H3 | Preview URL | 远程机器自己起服务 + 端口转发 | 🔵 |
-| H4 | Git push from runner | 远程机器的 git/gh 凭据 | 🔵 |
+| H1 | Ephemeral cloud Linux runner | `herdr machine` / `--remote` to a fixed VM; ephemeral runners via scripts | 🔵 |
+| H2 | `.agents/setup` / secrets | done in the remote shell/profile | 🔵 |
+| H3 | Preview URL | remote service + port forwarding | 🔵 |
+| H4 | Git push from the runner | the remote machine's git/gh credentials | 🔵 |
 
 ### I. UX
 
-| # | Delta 功能 | 替代 | 状态 |
+| # | Delta feature | Equivalent | Status |
 |---|---|---|---|
-| I1 | Command palette | herdr 自带 | ✅ |
+| I1 | Command palette | built into herdr | ✅ |
 | I2 | Keybindings | `~/.config/herdr/config.toml` | ✅ |
-| I3 | 搜索/文件查看 | reviewr 搜索 + file viewer；`rg` | ✅ |
-| I4 | 附件/mention 文件 | Agent 自身支持（@ 文件） | ✅ |
-| I5 | 编辑/回退消息 | Agent 会话自身；代码回退用 `herdr-thread checkpoint` + `git reset` | 🟡 |
-| I6 | 书签/标签/过滤 | thread DB | 🟡 |
-| I7 | 设置页 | `~/.config/herdr-thread/config.toml` | 🟡 |
+| I3 | Search / file view | reviewr search + file viewer; `rg` | ✅ |
+| I4 | Attachments / mention files | supported by the agent itself (`@file`) | ✅ |
+| I5 | Edit / revert messages | the agent session itself; code rollback via `herdr-change checkpoint` + `git reset` | 🟡 |
+| I6 | Bookmarks / tags / filtering | change DB | 🟡 |
+| I7 | Settings page | `~/.config/herdr-change/config.toml` | 🟡 |
 
-### J. CLI / 自动化
+### J. CLI / automation
 
-| # | Delta CLI | 替代 | 状态 |
+| # | Delta CLI | Equivalent | Status |
 |---|---|---|---|
-| J1 | `delta open` | `herdr-thread open <id>` / `herdr workspace focus` | 🟡 |
-| J2 | `delta thread` | `herdr-thread list/show` | 🟡 |
-| J3 | `delta worktree` | `herdr worktree *` + `herdr-thread new/cleanup` | ✅ |
-| J4 | `delta auth` | 各 Agent 自己的登录 | ✅ |
+| J1 | `delta open` | `herdr-change open <id>` / `herdr workspace focus` | 🟡 |
+| J2 | `delta change` | `herdr-change list/show` | 🟡 |
+| J3 | `delta worktree` | `herdr worktree *` + `herdr-change new/cleanup` | ✅ |
+| J4 | `delta auth` | each agent's own login | ✅ |
 | J6 | `delta integration` | herdr `integration` | ✅ |
 
 ---
 
-## 2. herdr-thread 架构
+## 2. herdr-change architecture
 
 ```
 ┌────────────────────────────────────────────┐
-│ herdr-thread (Python CLI)                  │
+│ herdr-change (Python CLI)                  │
 │  new/list/show/prompt/review/land/...      │
-│  SQLite: ~/.local/share/herdr-thread/db    │
+│  SQLite: ~/.local/share/herdr-change/changes.db │
 └───────────────┬────────────────────────────┘
                 │ herdr CLI (JSON)
 ┌───────────────▼────────────────────────────┐
@@ -129,41 +131,42 @@
 └────────────────────────────────────────────┘
 ```
 
-- **一个 thread = 一个 workspace + 一个 worktree + 一个 agent pane + reviewr pane**。
-- 状态不复制 Agent 的对话，只存编排元数据；对话留在 Agent 自己的 session 里。
-- 所有写操作只通过 herdr CLI / git，不直接碰 herdr 内部状态。
+- **one change = one workspace + one worktree + one agent pane + one reviewr pane**.
+- state never copies the agent's conversation; only orchestration metadata is stored, the
+  conversation stays in the agent's own session.
+- all writes go through the herdr CLI / git; herdr internals are never touched directly.
 
-### 数据表
+### Tables
 
 ```sql
-threads(
+changes(
   id, parent_id, label, repo, worktree, branch, base_ref,
   workspace_id, pane_id, review_pane_id,
   agent_name, agent_kind, status, review_state,
   tags, bookmarked, archived, created_at, head_sha, landed_at, meta
 )
-events(id, thread_id, at, kind, detail)
+events(id, change_id, at, kind, detail)
 ```
 
-### 命令
+### Commands
 
 ```
-new        建 worktree + workspace + agent + reviewr
-list       状态总览（agent state + dirty + ahead/behind + review）
-show       单线程详情
-prompt     给该线程 Agent 发指令
-review     聚焦 + 打开 reviewr（可选 reviewer agent / 记录 verdict）
-checkpoint git commit 当前改动（可回退点）
+new        create worktree + workspace + agent + reviewr
+list       status overview (agent state + dirty + ahead/behind + review)
+show       details for one change
+prompt     send a prompt to that change's agent
+review     focus + open reviewr (optional reviewer agent / record verdict)
+checkpoint git-commit the current diff (a rollback point)
 land       push / PR / merge
-sync       fetch + 更新状态；--rebase 拉上游
-fork       从当前 HEAD 建子线程
-subagent   worker/scout/reviewer 子线程
-open       聚焦 workspace
-tag        标签/收藏/归档
-cleanup    移除 worktree + 关闭 workspace
+sync       fetch + refresh state; --rebase pulls upstream
+fork       child change from the current HEAD
+subagent   worker/scout/reviewer child change
+open       focus the workspace
+tag        tag/bookmark/archive
+cleanup    remove the worktree + close the workspace
 ```
 
-### 配置 `~/.config/herdr-thread/config.toml`
+### Config `~/.config/herdr-change/config.toml`
 
 ```toml
 worktree_root = "~/.herdr-worktrees"
@@ -175,42 +178,46 @@ notify = true
 [profiles.worker]
 kind = "codex"
 args = []
-prompt = "你是实现子 Agent，只做被指派的子任务，完成后总结改动和验证。"
+prompt = "You are an implementation sub-agent. Do only the assigned subtask and summarise the changes and verification when done."
 
 [profiles.scout]
 kind = "codex"
 args = []
-prompt = "你是调研子 Agent，只读代码并给出结论，不改文件。"
+prompt = "You are a research sub-agent. Read code only, report conclusions, change nothing."
 
 [profiles.reviewer]
 kind = "codex"
 args = []
-prompt = "你是审查子 Agent，只读 diff，按文件列出风险、遗漏测试和回退建议。"
+prompt = "You are a review sub-agent. Read the diff only; list risks, missing tests and rollback advice per file."
 ```
 
 ---
 
-## 3. 分阶段
+## 3. Phases
 
-- **P0（已完成）**：`new/list/show/diff/prompt/review/checkpoint/land/cleanup/open` + DB + 配置。
-- **P1（已完成）**：`fork/subagent/sync --rebase/tag/archive`、状态轮询 + 通知、`.agents/prepare|setup` 钩子。
-- **P2（已完成）**：review verdict 持久化、`review --reviewer`、批量 land、PR/CI 状态轮询。
-- **P3（已完成）**：`machines/remote/notify` 透传、runner 生命周期/端口转发、share、RUNNER.md；托管平台本身不做。
-
----
-
-## 4. 明确的取舍
-
-- **不复制**：DeltaDB/CRDT、每轮增量快照、Web 端、富文本多人协作、云端临时 runner 的托管体验。
-- **保留**：git 作为唯一事实来源；Agent 自己的会话配置；reviewr 的审查体验。
-- **优势**：原生 WSL、无 GUI/DPI/光标/Portal 问题；可脚本化；换 Agent 不改工作流。
-
+- **P0 (done)**: `new/list/show/diff/prompt/review/checkpoint/land/cleanup/open` + DB + config.
+- **P1 (done)**: `fork/subagent/sync --rebase/tag/archive`, state polling + notifications,
+  `.agents/prepare|setup` hooks.
+- **P2 (done)**: persisted review verdicts, `review --reviewer`, batch land, PR/CI polling.
+- **P3 (done)**: `machines/remote/notify` passthrough, runner lifecycle/port forwarding, share,
+  RUNNER.md; the hosted platform itself is out of scope.
 
 ---
 
-## 5. 实现状态（v0.1，2026-10）
+## 4. Explicit trade-offs
 
-已落地命令：
+- **Not copied**: DeltaDB/CRDT, per-turn incremental snapshots, the web app, rich-text
+  multi-user collaboration, and the hosted ephemeral-runner experience.
+- **Kept**: git as the single source of truth; the agent's own session config; reviewr's
+  review experience.
+- **Advantages**: native WSL, no GUI/DPI/cursor/portal problems; scriptable; swapping agents
+  does not change the workflow.
+
+---
+
+## 5. Implementation status (v0.1, 2026-10)
+
+Shipped commands:
 
 ```
 new  list  show  setup  transcript  turn  search  capture  prompt  review
@@ -219,81 +226,88 @@ recover  watch  fork  subagent  join  machines  remote  runner  share  notify
 backup  prune  doctor
 ```
 
-已验证：
+Verified:
 
-- dummy repo：`new → reviewr → agent → prompt → sync → checkpoint → review --reviewer → land merge → cleanup`；
-- 批量 land：`land --all --strategy push --yes --cleanup`，两个分支都推到 bare remote；
-- PR/CI：fake `gh` 下 `land pr → sync --pr → MERGED`，`pr_state/ci_state` 正确迁移；
-- `land --strategy hook` 环境变量（THREAD_ID/BRANCH/WORKTREE）验证通过。
-- `.agents/prepare` + `.agents/setup` 在新 worktree 内执行；
-- `QP-GD26-0901`：`new --no-agent` 创建/清理后 `git worktree list` 无残留。
+- dummy repo: `new → reviewr → agent → prompt → sync → checkpoint → review --reviewer → land merge → cleanup`;
+- batch land: `land --all --strategy push --yes --cleanup` pushed both branches to the bare remote;
+- PR/CI: `land pr → sync --pr → MERGED` under a fake `gh`, with `pr_state/ci_state` migrating correctly;
+- `land --strategy hook` environment (CHANGE_ID/BRANCH/WORKTREE) verified;
+- `.agents/prepare` + `.agents/setup` run inside the new worktree;
+- `QP-GD26-0901`: after `new --no-agent` create/cleanup, `git worktree list` has no leftovers.
 
-已知边界：
+Known boundaries:
 
-- 多 repo 线程：主 repo 用 herdr workspace，其余 repo 用 `git worktree add`；Agent 默认在主 repo。
-- 远端 thread 的 DB 在远端机器，本地 `remote` 只做命令透传；runner 是脚本化流程。
-- reviewr 已打补丁：评论变更写入 `~/.cache/herdr-reviewr/*.json`，`comment --from-reviewr` / `review --sync-reviewr` 回写 SQLite。
-- 不做每轮自动快照；用 `checkpoint` 显式建提交作为回退点。
-- turn 的 edit/revert 只改元数据，不能改写 Agent 已发送的上下文。
-
-
----
-
-## 6. v0.2 补齐（2026-10）
-
-新增：
-
-- 安全门：dirty / rejected / require_approval / pre-land 脚本与命令；`land --allow-dirty/--force/--skip-checks`
-- PR 闭环：`merge-pr`、auto-merge、`pr --watch`、`watch --daemon/--status/--stop`、CI 归并
-- 恢复：`checkpoint --list/--restore`、`recover --create/--start/--prune`、`prune`
-- 多仓库：`thread_repos`、`thread_repos` 级 PR/CI、checkpoint/diff/land/cleanup 全仓遍历
-- 记录：turns / comments / attachments / search / bookmark / fork 上下文注入 / send
-- 子 Agent：`subagent --in-place` + `join`；独立线程子 Agent 仍保留
-- 模型：`roles.*`、`--role`、`fallback`
-- 运行环境：`runner add/up/down/bootstrap/forward/unforward`、`share`
-- 工程化：`backup`、`prune`、`HERDR_THREAD_DATA/CONFIG`、`pyproject.toml`、`tests/smoke.sh`
-
-仍不追：DeltaDB/CRDT、Web 端、富文本多人协作、托管 Cloud Runner。
+- multi-repo changes: the primary repo gets the herdr workspace, other repos use
+  `git worktree add`; the agent lives in the primary repo by default.
+- remote change DBs live on the remote machine; local `remote` only passes commands through;
+  runners are a scripted flow.
+- reviewr is patched: comment changes are written to `~/.cache/herdr-reviewr/*.json`, and
+  `comment --from-reviewr` / `review --sync-reviewr` write them back to SQLite.
+- no automatic per-turn snapshots; `checkpoint` creates an explicit commit as a rollback point.
+- turn edit/revert only changes metadata, it cannot rewrite context the agent already received.
 
 ---
 
-## 7. v0.3 补齐（2026-10）
+## 6. v0.2 additions (2026-10)
 
-- Thread 生命周期：`children/resume/rename/delete/restore-thread`、`mention/openfile`
-- 对话编辑：`turn --edit/--revert --reseed` 写 canonical context 并重新对齐 Agent
-- Review：`guide`、`share --review` HTML、`check-remote`
-- Land：依赖 `depend` + 拓扑排序、`local` 策略、`--skip-deps`
-- Sync：`--rebase` 与 `--merge` 都先 fetch
-- 子 Agent：`follow` 聚焦/读取
-- Terminal：线程级 list/new/run/close
-- Runner：env/push-env/preview/urls/snapshot/destroy
-- Web/Inbox：`serve` 本地 dashboard、POST 写评论/note、token/TLS
-- CLI：`config`（含嵌套 key）、`delta` 别名、`restore-db`
-- 工程：单元测试 + GitHub Actions、SQLite `user_version=3`
+New:
 
-本地等价物：Web/CRDT/托管 runner 用 `serve` + SQLite 单写、review HTML、SSH 脚本替代。
+- safety gates: dirty / rejected / require_approval / pre-land script and commands;
+  `land --allow-dirty/--force/--skip-checks`
+- PR loop: `merge-pr`, auto-merge, `pr --watch`, `watch --daemon/--status/--stop`, CI rollup
+- recovery: `checkpoint --list/--restore`, `recover --create/--start/--prune`, `prune`
+- multi-repo: `change_repos`, per-repo PR/CI, checkpoint/diff/land/cleanup across all repos
+- records: turns / comments / attachments / search / bookmark / fork context injection / send
+- sub-agents: `subagent --in-place` + `join`; standalone child changes remain
+- models: `roles.*`, `--role`, `fallback`
+- environments: `runner add/up/down/bootstrap/forward/unforward`, `share`
+- engineering: `backup`, `prune`, `HERDR_CHANGE_DATA/CONFIG`, `pyproject.toml`, `tests/smoke.sh`
 
-## 8. v0.4 收尾（2026-10）
+Still out of scope: DeltaDB/CRDT, web app, rich-text collaboration, hosted cloud runner.
 
-- `serve` 支持 POST 写评论/note + token 鉴权；`--daemon/--stop/--status`
-- `comment --import/--export/--from-clipboard`，`comment --send --to` 跨线程
-- `land --json` 纯 JSON（日志在 `log` 字段）
-- `config set`、`delta auth login/logout`、`usage`、`restore-db`
-- 写命令文件锁 `write.lock`
-- `fork --clone-session` fork pi/codex session；多仓 fork/subagent 克隆额外 repo；`HERDR_THREAD_REPOS` 注入 agent 环境；`repos` 命令
-- 远端镜像：`mirror <machine>` / `remote-threads`
-- PR：GitHub/GitLab/Azure 创建与状态读取
-- 写命令文件锁
-- SQLite `user_version=3`；unit + smoke + GitHub Actions
+---
 
-## 9. emb-agent 桥接（L1）
+## 7. v0.3 additions (2026-10)
 
-- `emb status`：只读 active task / gate / journal
-- `emb adopt`：用 emb 创建/选择 worktree，再 `herdr worktree open` 接管
-- thread 记录 `emb_task`；`list/show` 显示
-- `cleanup` 先调 `emb-agent task worktree cleanup`
-- 插件 `prefix+t` 在 emb 项目自动 `emb adopt --focus`；CLI `new/task` 默认拒绝
-- `prefix+alt+d` 在 emb 项目自动带 `--emb-finish`
-- `land` 前跑 `emb-agent start --json` gate；`--skip-emb-check` 可覆盖
-- `--emb-finish` 在 land 后调用 `emb-agent finish-work` 回写 journal
-- 待做：自动生成 emb verification（当前由 emb 自己的流程完成）
+- change lifecycle: `children/resume/rename/delete/restore-change`, `mention/openfile`
+- conversation editing: `turn --edit/--revert --reseed` rewrites the canonical context and
+  realigns the agent
+- review: `guide`, `share --review` HTML, `check-remote`
+- land: `depend` + topological order, `local` strategy, `--skip-deps`
+- sync: both `--rebase` and `--merge` fetch first
+- sub-agents: `follow` to focus/read
+- terminals: change-scoped list/new/run/close
+- runners: env/push-env/preview/urls/snapshot/destroy
+- web/inbox: `serve` local dashboard, POST comments/notes, token/TLS
+- CLI: `config` (including nested keys), `delta` aliases, `restore-db`
+- engineering: unit tests + GitHub Actions, SQLite `user_version=3`
+
+Local equivalents: web/CRDT/hosted runner are replaced by `serve` + single-writer SQLite,
+review HTML, and SSH scripts.
+
+## 8. v0.4 wrap-up (2026-10)
+
+- `serve` supports POST for comments/notes + token auth; `--daemon/--stop/--status`
+- `comment --import/--export/--from-clipboard`, `comment --send --to` across changes
+- `land --json` emits pure JSON (logs in the `log` field)
+- `config set`, `delta auth login/logout`, `usage`, `restore-db`
+- file lock `write.lock` for write commands
+- `fork --clone-session` forks the pi/codex session; multi-repo fork/subagent clone extra
+  repos; `HERDR_CHANGE_REPOS` injected into the agent env; `repos` command
+- remote mirror: `mirror <machine>` / `remote-changes`
+- PRs: GitHub/GitLab/Azure creation and state reads
+- project renamed `herdr-thread` → `herdr-change`: tables/columns, env vars, paths, plugin id,
+  plus an automatic one-time migration of the old config dir, database, and schema
+- SQLite `user_version=4`; unit + smoke + GitHub Actions
+
+## 9. emb-agent bridge (L1)
+
+- `emb status`: read-only active task / gate / journal
+- `emb adopt`: create/select a worktree via emb, then take it over with `herdr worktree open`
+- change records carry `emb_task`; shown in `list/show`
+- `cleanup` calls `emb-agent task worktree cleanup` first
+- the `prefix+t` plugin adopts automatically in emb projects; CLI `new/task` refuses by default
+- `prefix+alt+d` adds `--emb-finish` in emb projects
+- `land` runs the `emb-agent start --json` gate first; `--skip-emb-check` overrides
+- `--emb-finish` calls `emb-agent finish-work` after landing to write the journal back
+- TODO: generate emb verification automatically (emb's own flow does it today)
