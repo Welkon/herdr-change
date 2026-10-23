@@ -21,6 +21,20 @@ width = "52%"
 height = "50%"
 command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-/home/felix/herdr-thread/herdr-plugin}/done.sh\""]
 
+[[panes]]
+id = "close"
+title = "close task"
+placement = "popup"
+width = "52%"
+height = "42%"
+command = ["bash", "-c", "exec \"${HERDR_PLUGIN_ROOT:-/home/felix/herdr-thread/herdr-plugin}/close.sh\""]
+
+[[actions]]
+id = "close"
+title = "herdr-thread: close current"
+contexts = ["pane", "workspace"]
+command = ["bash", "open.sh", "close"]
+
 [[actions]]
 id = "task"
 title = "herdr-thread: new task"

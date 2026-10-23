@@ -24,6 +24,7 @@ Delta 式「线程 + worktree + Agent + 审查 + 落地」工作流，构建在 
 prefix+t        新建任务（插件 popup，标题 new task）
 prefix+alt+r    审查当前 worktree 对应线程
 prefix+alt+d    完成当前线程（插件 popup，标题 finish thread）
+prefix+alt+c    关闭当前任务：只关窗口 / 清理 worktree
 ```
 
 安装/修复：
@@ -164,7 +165,7 @@ thread
 | `join` | 收集子 Agent 输出并回传父 Agent |
 | `open` | 聚焦 workspace |
 | `tag` | 标签 / 收藏 / 归档 |
-| `cleanup` | 移除所有 repo 的 worktree + workspace |
+| `cleanup` / `close-here` | 移除所有 repo 的 worktree + workspace；`--window` 只关窗口 |
 | `recover` | 重新绑定 workspace/pane/agent；`--create/--start/--prune` |
 | `emb` | emb-agent 项目桥接：`status` / `adopt` |
 | `adopt` | 接管已有 worktree（不新建） |

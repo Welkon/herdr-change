@@ -3180,6 +3180,12 @@ key = "prefix+alt+d"
 type = "plugin_action"
 command = "herdr-thread.ui.done"
 description = "herdr-thread: done current"
+
+[[keys.command]]
+key = "prefix+alt+c"
+type = "plugin_action"
+command = "herdr-thread.ui.close"
+description = "herdr-thread: close current"
 """
 
 
@@ -3420,9 +3426,99 @@ def _ui_done():
     return _run_curses(draw)
 
 
+def _ui_close():
+    import curses
+
+    options = [
+        ("w", "Close window only", "keep worktree"),
+        ("c", "Cleanup worktree", "remove checkout + archive thread"),
+        ("x", "Cancel", ""),
+    ]
+
+    def draw(stdscr):
+        curses.curs_set(0)
+        _ui_colors()
+        try:
+            curses.set_escdelay(25)
+        except AttributeError:
+            pass
+        stdscr.keypad(True)
+        selected = 0
+        while True:
+            h, w = stdscr.getmaxyx()
+            stdscr.erase()
+            bw = max(40, min(w - 8, 68))
+            x = max(2, (w - bw) // 2)
+            y = max(0, (h - 8) // 2)
+            footer = max(0, h - 2)
+            try:
+                stdscr.attrset(curses.color_pair(1) | curses.A_BOLD)
+                stdscr.addnstr(y, x, "herdr-thread", bw)
+                stdscr.attrset(curses.color_pair(6))
+                stdscr.addnstr(y, x + 13, "  close", bw - 13)
+                stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
+                stdscr.addnstr(y + 2, x, "Close this task?", bw)
+                for i, (key, label, hint) in enumerate(options):
+                    row = y + 3 + i
+                    if i == selected:
+                        stdscr.attrset(curses.color_pair(5) | curses.A_BOLD)
+                        stdscr.addnstr(row, x, f"  {label}  ", bw)
+                        stdscr.attrset(curses.color_pair(5) | curses.A_DIM)
+                        stdscr.addnstr(row, x + len(label) + 4, hint, max(1, bw - len(label) - 5))
+                    else:
+                        stdscr.attrset(curses.color_pair(4))
+                        stdscr.addnstr(row, x, f"  {label}  ", bw)
+                        stdscr.attrset(curses.color_pair(6))
+                        stdscr.addnstr(row, x + len(label) + 4, hint, max(1, bw - len(label) - 5))
+                stdscr.attrset(curses.color_pair(4) | curses.A_BOLD)
+                stdscr.addnstr(footer, x, "  Enter  Select  ", 17)
+                stdscr.attrset(curses.color_pair(4))
+                stdscr.addnstr(footer, x + 19, "  Esc  Cancel  ", 15)
+                stdscr.refresh()
+            except curses.error:
+                pass
+            try:
+                ch = stdscr.get_wch()
+            except curses.error:
+                continue
+            if ch in ("\x1b", 27, curses.KEY_EXIT):
+                return None
+            if ch in (curses.KEY_UP, "k"):
+                selected = (selected - 1) % len(options)
+            elif ch in (curses.KEY_DOWN, "j", "\t"):
+                selected = (selected + 1) % len(options)
+            elif ch in ("\n", "\r", curses.KEY_ENTER):
+                return options[selected][0]
+            elif isinstance(ch, str):
+                for k, _, _ in options:
+                    if ch == k:
+                        return k
+
+    return _run_curses(draw)
+
+
+def cmd_close_here(args):
+    conn = db()
+    path = os.environ.get("HERDR_THREAD_CWD") or os.environ.get("HERDR_ACTIVE_PANE_CWD") or os.getcwd()
+    r = thread_for_path(conn, path)
+    if not r:
+        die(f"no herdr-thread for cwd: {path}")
+    if args.window:
+        if r["workspace_id"]:
+            herdr("workspace", "close", r["workspace_id"])
+        print(f"closed workspace for {r['id']} (worktree kept)")
+    else:
+        cleanup_thread(conn, r, force=False)
+
+
 def cmd_ui(args):
     try:
-        value = _ui_task() if args.kind == "task" else _ui_done()
+        if args.kind == "task":
+            value = _ui_task()
+        elif args.kind == "done":
+            value = _ui_done()
+        else:
+            value = _ui_close()
     except Exception as e:
         print(f"herdr-thread ui failed: {e}", file=sys.stderr)
         value = None
@@ -3988,6 +4084,10 @@ def build_parser():
     em.add_argument("--focus", action="store_true")
     em.set_defaults(func=cmd_emb)
 
+    clh = sub.add_parser("close-here", help="close current thread workspace or cleanup worktree")
+    clh.add_argument("--window", action="store_true", help="close workspace only, keep worktree")
+    clh.set_defaults(func=cmd_close_here)
+
     ch = sub.add_parser("children", help="show child threads")
     ch.add_argument("id")
     ch.add_argument("--json", action="store_true")
@@ -4198,7 +4298,7 @@ def build_parser():
     pn.set_defaults(func=cmd_prune)
 
     ui = sub.add_parser("ui", help="interactive task/done UI used by herdr keybindings")
-    ui.add_argument("kind", choices=["task", "done"])
+    ui.add_argument("kind", choices=["task", "done", "close"])
     ui.add_argument("--result", help="write selection to this file instead of stdout")
     ui.set_defaults(func=cmd_ui)
 
